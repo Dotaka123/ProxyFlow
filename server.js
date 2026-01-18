@@ -6,7 +6,7 @@ const app = express().use(bodyParser.json());
 
 // Configuration
 const PAGE_ACCESS_TOKEN = 'EAAI12hLrtqEBQXKdwMnbFTZCdXyEXHVWUsewGrZAK28NrIvSJZAS2mOQt1K7GbrfFdBgjJgtae4LxVaPJ2UPf3c20YAlvZAypZBk7jahFt7qu3wCyuUaIci5IsgI7ovwLXKJQiNUgvTUNjC08ECSv9xir82e8MKDzKMkyAag8ABgrPC3wjkNbGf2gUA5aX4NW9aP5y8S7pRFMiISunGCD0HGYNAZDZD';
-const VERIFY_TOKEN = 'proxyflow_secret_2026'; // À copier dans le champ "Vérifier le jeton" sur Meta
+const VERIFY_TOKEN = 'tata'; // À copier dans le champ "Vérifier le jeton" sur Meta
 
 // 1. Route de vérification (Meta Dashboard)
 app.get('/webhook', (req, res) => {
