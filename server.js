@@ -4,27 +4,20 @@ const axios = require('axios');
 
 const app = express().use(bodyParser.json());
 
-// Configuration
-const PAGE_ACCESS_TOKEN = 'EAAI12hLrtqEBQZAbgZBOFr2E4YXq2oGx5F1RdYrTbbImo2JBXjaORiVr9dbzqp9565fWfuebktWnUdkN7elY6lwlLNhFTToazwadDkKmIZBYZCfxxSMcl6j4eqPl6GVT0RjO0gHsIoLXwpjt7c2OFZBtsEJw78JirTNhurKcjVDavayAYUXS8bvjErS2unB8gFDgoP5Pk3aqOSLBdynvveV9MBAZDZD';
-const VERIFY_TOKEN = 'tata'; // À copier dans le champ "Vérifier le jeton" sur Meta
+// CONFIGURATION
+const PAGE_ACCESS_TOKEN = 'EAAI12hLrtqEBQXKdwMnbFTZCdXyEXHVWUsewGrZAK28NrIvSJZAS2mOQt1K7GbrfFdBgjJgtae4LxVaPJ2UPf3c20YAlvZAypZBk7jahFt7qu3wCyuUaIci5IsgI7ovwLXKJQiNUgvTUNjC08ECSv9xir82e8MKDzKMkyAag8ABgrPC3wjkNbGf2gUA5aX4NW9aP5y8S7pRFMiISunGCD0HGYNAZDZD';
+const VERIFY_TOKEN = 'proxyflow_secret_2026';
 
-// 1. Route de vérification (Meta Dashboard)
+// 1. VERIFICATION DU WEBHOOK
 app.get('/webhook', (req, res) => {
-    let mode = req.query['hub.mode'];
-    let token = req.query['hub.verify_token'];
-    let challenge = req.query['hub.challenge'];
-
-    if (mode && token) {
-        if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-            console.log('WEBHOOK_VERIFIED');
-            res.status(200).send(challenge);
-        } else {
-            res.sendStatus(403);      
-        }
+    if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) {
+        res.status(200).send(req.query['hub.challenge']);
+    } else {
+        res.sendStatus(403);
     }
 });
 
-// 2. Réception des messages et clics
+// 2. RECEPTION DES EVENEMENTS
 app.post('/webhook', (req, res) => {
     let body = req.body;
 
@@ -45,19 +38,19 @@ app.post('/webhook', (req, res) => {
     }
 });
 
-// 3. Le message de bienvenue avec boutons
+// 3. MESSAGE DE BIENVENUE
 function sendWelcomeMessage(sender_psid) {
     const response = {
         "attachment": {
             "type": "template",
             "payload": {
                 "template_type": "button",
-                "text": "Bienvenue chez ProxyFlow ! 🌐\n\nBesoin de proxys ISP ultra-rapides ? Vous êtes au bon endroit.",
+                "text": "Bienvenue chez ProxyFlow ! 🌐\n\nBesoin d'une connexion stable ? Nos proxys ISP sont à votre disposition.",
                 "buttons": [
                     {
                         "type": "postback",
-                        "title": "🛒 Acheter Proxy (3.5$)",
-                        "payload": "BUY_PROXY"
+                        "title": "🛒 Acheter un proxy",
+                        "payload": "START_ORDER"
                     },
                     {
                         "type": "postback",
@@ -76,25 +69,77 @@ function sendWelcomeMessage(sender_psid) {
     callSendAPI(sender_psid, response);
 }
 
-// 4. Gestion des actions (Postbacks)
+// 4. LOGIQUE DES BOUTONS (POSTBACKS)
 function handlePostback(sender_psid, payload) {
     let response;
 
     switch (payload) {
-        case 'BUY_PROXY':
-            response = { "text": "💳 Proxy ISP (Statique/Résidentiel)\n\nPrix : 3.5$\nStatut : En stock\n\nPour commander, cliquez sur ce lien de paiement sécurisé : [LIEN_STRIPE_OU_PAYPAL]" };
+        case 'START_ORDER':
+            // Choix du pays (USA uniquement)
+            response = {
+                "attachment": {
+                    "type": "template",
+                    "payload": {
+                        "template_type": "button",
+                        "text": "🌍 Étape 1 : Choisissez le pays.\n(Actuellement : USA uniquement)",
+                        "buttons": [
+                            {
+                                "type": "postback",
+                                "title": "🇺🇸 USA",
+                                "payload": "SELECT_USA"
+                            }
+                        ]
+                    }
+                }
+            };
             break;
+
+        case 'SELECT_USA':
+            // Choix du Provider (Verizon ou T-Mobile)
+            response = {
+                "attachment": {
+                    "type": "template",
+                    "payload": {
+                        "template_type": "button",
+                        "text": "📶 Étape 2 : Choisissez votre fournisseur ISP (4$).",
+                        "buttons": [
+                            {
+                                "type": "postback",
+                                "title": "Verizon",
+                                "payload": "BUY_VERIZON"
+                            },
+                            {
+                                "type": "postback",
+                                "title": "T-Mobile",
+                                "payload": "BUY_TMOBILE"
+                            }
+                        ]
+                    }
+                }
+            };
+            break;
+
+        case 'BUY_VERIZON':
+        case 'BUY_TMOBILE':
+            const provider = (payload === 'BUY_VERIZON') ? "Verizon" : "T-Mobile";
+            response = {
+                "text": `✅ Commande : Proxy ISP USA - ${provider}\n💰 Prix : 4$\n\nVeuillez cliquer sur le lien ci-dessous pour payer et recevoir votre proxy instantanément :\n\n[LIEN_DE_PAIEMENT_ICI]`
+            };
+            break;
+
         case 'ABOUT':
-            response = { "text": "ProxyFlow fournit des proxys ISP. Contrairement aux proxys classiques, ils sont reconnus comme des connexions domestiques réelles, ce qui évite les blocages sur les sites sensibles." };
+            response = { "text": "ProxyFlow est spécialisé dans les proxys ISP (Verizon, T-Mobile). Nos adresses IP sont reconnues comme des connexions domestiques réelles, parfaites pour éviter les détections." };
             break;
+
         case 'SUPPORT':
-            response = { "text": "🚀 Un agent va prendre connaissance de votre message. Vous pouvez poser votre question directement ici." };
+            response = { "text": "💬 Posez votre question ici. Un agent de ProxyFlow vous répondra dans les plus brefs délais." };
             break;
     }
+    
     callSendAPI(sender_psid, response);
 }
 
-// 5. Envoi vers Facebook Graph API
+// 5. ENVOI DES MESSAGES VERS FACEBOOK
 function callSendAPI(sender_psid, response) {
     axios({
         method: 'POST',
@@ -109,5 +154,6 @@ function callSendAPI(sender_psid, response) {
     });
 }
 
+// LANCEMENT DU SERVEUR
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`ProxyFlow tourne sur le port ${PORT}`));
+app.listen(PORT, () => console.log(`ProxyFlow est en ligne sur le port ${PORT}`));
