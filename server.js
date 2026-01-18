@@ -38,6 +38,7 @@ app.post('/webhook', async (req, res) => {
     let body = req.body;
     if (body.object === 'page') {
         for (const entry of body.entry) {
+            if (!entry.messaging) continue;
             let event = entry.messaging[0];
             let psid = event.sender.id;
             let user = await User.findOne({ psid }) || await User.create({ psid });
@@ -54,8 +55,8 @@ app.post('/webhook', async (req, res) => {
 
 // --- GESTION DES MESSAGES ---
 async function handleMessage(psid, text, user) {
-    // Logique Auth (Email/Pass/Captcha)
-    if (user.step === 'SIGNUP_EMAIL') { user.email = text; user.step = 'SIGNUP_PASS'; await user.save(); return sendText(psid, "🔐 Mot de passe :"); }
+    // Inscription
+    if (user.step === 'SIGNUP_EMAIL') { user.email = text; user.step = 'SIGNUP_PASS'; await user.save(); return sendText(psid, "🔐 Choisissez un mot de passe :"); }
     if (user.step === 'SIGNUP_PASS') { 
         user.password = text; const n1 = Math.floor(Math.random()*10), n2 = Math.floor(Math.random()*10);
         user.captchaAnswer = n1 + n2; user.step = 'SIGNUP_CAPTCHA'; await user.save();
@@ -63,15 +64,21 @@ async function handleMessage(psid, text, user) {
     }
     if (user.step === 'SIGNUP_CAPTCHA') {
         if (parseInt(text) === user.captchaAnswer) { user.isRegistered = true; user.isLoggedIn = true; user.step = 'IDLE'; await user.save(); return sendWelcomeMenu(psid, user); }
-        return sendText(psid, "❌ Erreur de calcul.");
+        return sendText(psid, "❌ Erreur de calcul. Réessayez.");
     }
 
-    // Login
-    if (user.step === 'LOGIN_EMAIL') { user.email = text; user.step = 'LOGIN_PASS'; await user.save(); return sendText(psid, "🔑 Mot de passe :"); }
+    // Connexion
+    if (user.step === 'LOGIN_EMAIL') { user.email = text; user.step = 'LOGIN_PASS'; await user.save(); return sendText(psid, "🔑 Entrez votre mot de passe :"); }
     if (user.step === 'LOGIN_PASS') {
         const acc = await User.findOne({ email: user.email, password: text });
         if (acc) { user.isLoggedIn = true; user.step = 'IDLE'; await user.save(); return sendWelcomeMenu(psid, user); }
-        return sendText(psid, "❌ Incorrect.");
+        return sendText(psid, "❌ Mot de passe incorrect.");
+    }
+
+    // Réception ID Binance pour recharge ou paiement
+    if (user.step === 'AWAITING_BINANCE_ID') {
+        user.step = 'IDLE'; await user.save();
+        return sendText(psid, `✅ ID Binance (${text}) reçu ! Un administrateur va vérifier et valider votre demande.`);
     }
 
     if (!user.isLoggedIn) return sendAuthPrompt(psid);
@@ -80,58 +87,76 @@ async function handleMessage(psid, text, user) {
 
 // --- GESTION DES BOUTONS ---
 async function handlePostback(psid, payload, user) {
-    if (payload === 'GOTO_SIGNUP') { user.step = 'SIGNUP_EMAIL'; await user.save(); return sendText(psid, "📧 Email :"); }
-    if (payload === 'GOTO_LOGIN') { user.step = 'LOGIN_EMAIL'; await user.save(); return sendText(psid, "📧 Email :"); }
+    if (payload === 'GOTO_SIGNUP') { user.step = 'SIGNUP_EMAIL'; await user.save(); return sendText(psid, "📧 Entrez votre email :"); }
+    if (payload === 'GOTO_LOGIN') { user.step = 'LOGIN_EMAIL'; await user.save(); return sendText(psid, "📧 Entrez votre email :"); }
 
     if (!user.isLoggedIn) return sendAuthPrompt(psid);
 
-    // DEBUT DU FLUX D'ACHAT
-    if (payload === 'START_ORDER') {
-        return sendButtons(psid, "🌍 Étape 1 : Pays", [{ "title": "🇺🇸 USA", "payload": "STEP_PROV" }]);
-    }
+    switch (payload) {
+        case 'MY_ACCOUNT':
+            const info = `👤 Compte : ${user.email}\n💰 Solde : ${user.balance}$`;
+            sendButtons(psid, info, [
+                { "title": "➕ Recharger", "payload": "ADD_FUNDS" },
+                { "title": "📜 Mes Achats", "payload": "MY_ORDERS" }
+            ]);
+            break;
 
-    if (payload === 'STEP_PROV') {
-        return sendButtons(psid, "📶 Étape 2 : Fournisseur (4$)", [
-            { "title": "Verizon", "payload": "PAY_METHOD_Verizon" },
-            { "title": "T-Mobile", "payload": "PAY_METHOD_TMobile" }
-        ]);
-    }
+        case 'ADD_FUNDS':
+            sendText(psid, "💰 Recharge (Min 4$) :\n\n1. Envoyez USDT -> Binance ID: 1192024137\n2. Tapez votre ID BINANCE ici.");
+            user.step = 'AWAITING_BINANCE_ID';
+            await user.save();
+            break;
 
-    if (payload.startsWith('PAY_METHOD_')) {
-        const provider = payload.replace('PAY_METHOD_', '');
-        return sendButtons(psid, `💳 Proxy ${provider} (4$)\nChoisissez votre méthode de paiement :`, [
-            { "title": "💰 Solde Local ($" + user.balance + ")", "payload": `FINAL_BAL_${provider}` },
-            { "title": "🆔 Binance Pay", "payload": `FINAL_BIN_${provider}` },
-            { "title": "🚀 Litecoin (LTC)", "payload": `FINAL_LTC_${provider}` }
-        ]);
-    }
+        case 'MY_ORDERS':
+            const orders = await Order.find({ psid }).sort({ date: -1 }).limit(5);
+            if (orders.length === 0) return sendText(psid, "Aucune commande trouvée.");
+            let txt = "📋 Historique :\n";
+            orders.forEach(o => txt += `\n🔹 ${o.orderId} | ${o.provider} | ${o.status}`);
+            sendText(psid, txt);
+            break;
 
-    // TRAITEMENT FINAL DU PAIEMENT
-    if (payload.startsWith('FINAL_')) {
-        const parts = payload.split('_'); // [FINAL, METHOD, PROVIDER]
-        const method = parts[1];
-        const provider = parts[2];
-        const orderID = "PF" + Math.floor(Math.random()*90000);
+        case 'START_ORDER':
+            sendButtons(psid, "🌍 Étape 1 : Pays", [{ "title": "🇺🇸 USA", "payload": "STEP_PROV" }]);
+            break;
 
-        if (method === 'BAL') {
+        case 'STEP_PROV':
+            sendButtons(psid, "📶 Étape 2 : Fournisseur (4$)", [
+                { "title": "Verizon", "payload": "METHOD_Verizon" },
+                { "title": "T-Mobile", "payload": "METHOD_TMobile" }
+            ]);
+            break;
+
+        case payload.startsWith('METHOD_') ? payload : null:
+            const prov = payload.replace('METHOD_', '');
+            sendButtons(psid, `💳 Proxy ${prov} (4$)\nMode de paiement :`, [
+                { "title": `💰 Solde (${user.balance}$)`, "payload": `BUY_BAL_${prov}` },
+                { "title": "🆔 Binance Pay", "payload": `BUY_BIN_${prov}` },
+                { "title": "🚀 Litecoin (LTC)", "payload": `BUY_LTC_${prov}` }
+            ]);
+            break;
+
+        case payload.startsWith('BUY_BAL_') ? payload : null:
+            const pB = payload.replace('BUY_BAL_', '');
             if (user.balance >= 4) {
                 user.balance -= 4; await user.save();
-                await Order.create({ psid, orderId: orderID, method: 'BALANCE', provider, status: 'LIVRÉ' });
-                return sendText(psid, `✅ Achat réussi ! 4$ débités de votre solde.\nNuméro : ${orderID}\n🚀 Vos accès arrivent.`);
+                const id = "PF" + Math.floor(Math.random()*9999);
+                await Order.create({ psid, orderId: id, method: 'SOLDE', provider: pB, status: 'LIVRÉ' });
+                sendText(psid, `✅ Payé par solde ! Commande ${id} validée. Vos accès arrivent.`);
             } else {
-                return sendText(psid, `❌ Solde insuffisant (${user.balance}$). Veuillez choisir une autre méthode.`);
+                sendText(psid, `❌ Solde insuffisant (${user.balance}$). Rechargez ou utilisez Binance/LTC.`);
             }
-        }
+            break;
 
-        if (method === 'BIN') {
-            await Order.create({ psid, orderId: orderID, method: 'BINANCE', provider });
-            return sendText(psid, `🛒 Commande ${orderID} en attente.\n\nEnvoyez 4$ USDT vers Binance ID: 1192024137\n\nEnvoyez votre ID Binance ici pour valider.`);
-        }
-
-        if (method === 'LTC') {
-            await Order.create({ psid, orderId: orderID, method: 'LTC', provider });
-            return sendText(psid, `🛒 Commande ${orderID} en attente.\n\nEnvoyez 4$ LTC vers: ltc1q64ycstakcvdycemj7tj9nexdnc25vv24l4vc8g\n\nContactez le support avec la preuve.`);
-        }
+        case payload.startsWith('BUY_BIN_') ? payload : null:
+        case payload.startsWith('BUY_LTC_') ? payload : null:
+            const isBin = payload.includes('BIN');
+            const provider = payload.split('_')[2];
+            const idPay = "PF" + Math.floor(Math.random()*9999);
+            await Order.create({ psid, orderId: idPay, method: isBin ? 'BINANCE' : 'LTC', provider });
+            const instr = isBin ? "Binance ID: 1192024137\nEnvoyez votre ID Binance ici." : "LTC: ltc1q64ycstakcvdycemj7tj9nexdnc25vv24l4vc8g\nContactez le support.";
+            sendText(psid, `🛒 Commande ${idPay} (${provider})\n\n${instr}`);
+            if (isBin) { user.step = 'AWAITING_BINANCE_ID'; await user.save(); }
+            break;
     }
 }
 
@@ -147,8 +172,8 @@ function sendButtons(psid, text, btns) {
     const buttons = btns.map(b => ({ "type": "postback", "title": b.title, "payload": b.payload }));
     callSendAPI(psid, { "attachment": { "type": "template", "payload": { "template_type": "button", "text": text, "buttons": buttons } } });
 }
-function callSendAPI(sender_psid, response) {
-    axios.post(`https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, { recipient: { id: sender_psid }, message: response }).catch(e => {});
+function callSendAPI(psid, response) {
+    axios.post(`https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, { recipient: { id: psid }, message: response }).catch(e => {});
 }
 
-app.listen(3000, () => console.log("🚀 ProxyFlow v4.0 opérationnel !"));
+app.listen(3000, () => console.log("🚀 ProxyFlow v4.1 Terminé !"));
