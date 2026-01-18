@@ -5,132 +5,123 @@ const mongoose = require('mongoose');
 
 const app = express().use(bodyParser.json());
 
-// CONFIGURATION
+// --- CONFIGURATION ---
 const PAGE_ACCESS_TOKEN = 'EAAI12hLrtqEBQXKdwMnbFTZCdXyEXHVWUsewGrZAK28NrIvSJZAS2mOQt1K7GbrfFdBgjJgtae4LxVaPJ2UPf3c20YAlvZAypZBk7jahFt7qu3wCyuUaIci5IsgI7ovwLXKJQiNUgvTUNjC08ECSv9xir82e8MKDzKMkyAag8ABgrPC3wjkNbGf2gUA5aX4NW9aP5y8S7pRFMiISunGCD0HGYNAZDZD';
 const VERIFY_TOKEN = 'tata';
 const MONGO_URI = 'mongodb+srv://rakotoniainalahatra3_db_user:RXy0cKTSWpXtgCUA@cluster0.gzeshjm.mongodb.net/proxyflow?retryWrites=true&w=majority';
 
-// CONNEXION MONGODB
-mongoose.connect(MONGO_URI)
-    .then(() => console.log("Connecté à MongoDB !"))
-    .catch(err => console.error("Erreur de connexion MongoDB:", err));
+mongoose.connect(MONGO_URI).then(() => console.log("MongoDB Connecté"));
 
-// MODELE UTILISATEUR
+// --- MODÈLE UTILISATEUR ---
 const UserSchema = new mongoose.Schema({
     psid: { type: String, unique: true },
+    email: String,
+    password: String,
     isRegistered: { type: Boolean, default: false },
-    signupDate: { type: Date, default: Date.now },
-    balance: { type: Number, default: 0 }
+    step: { type: String, default: 'IDLE' }, // IDLE, AWAITING_EMAIL, AWAITING_PASS, AWAITING_CAPTCHA
+    captchaAnswer: Number
 });
 const User = mongoose.model('User', UserSchema);
 
-// WEBHOOK
-app.get('/webhook', (req, res) => {
-    if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) {
-        res.status(200).send(req.query['hub.challenge']);
-    } else { res.sendStatus(403); }
-});
-
+// --- WEBHOOK ---
 app.post('/webhook', async (req, res) => {
     let body = req.body;
     if (body.object === 'page') {
         for (const entry of body.entry) {
-            let webhook_event = entry.messaging[0];
-            let sender_psid = webhook_event.sender.id;
+            let event = entry.messaging[0];
+            let psid = event.sender.id;
+            let user = await User.findOne({ psid }) || await User.create({ psid });
 
-            // Verification ou Creation de l'utilisateur
-            let user = await User.findOne({ psid: sender_psid });
-            if (!user) {
-                user = await User.create({ psid: sender_psid });
-            }
-
-            if (webhook_event.message) {
-                if (!user.isRegistered) {
-                    sendSignupPrompt(sender_psid);
-                } else {
-                    sendWelcomeMessage(sender_psid);
-                }
-            } else if (webhook_event.postback) {
-                handlePostback(sender_psid, webhook_event.postback.payload, user);
+            if (event.message && event.message.text) {
+                handleMessage(psid, event.message.text, user);
+            } else if (event.postback) {
+                handlePostback(psid, event.postback.payload, user);
             }
         }
         res.status(200).send('EVENT_RECEIVED');
-    } else { res.sendStatus(404); }
+    }
 });
 
-// PROMPT D'INSCRIPTION
-function sendSignupPrompt(sender_psid) {
+// --- GESTION DES MESSAGES TEXTES (LOGIN / SIGNUP) ---
+async function handleMessage(psid, text, user) {
+    if (!user.isRegistered) {
+        if (user.step === 'AWAITING_EMAIL') {
+            user.email = text;
+            user.step = 'AWAITING_PASS';
+            await user.save();
+            return sendText(psid, "🔐 Super. Maintenant, choisissez un mot de passe :");
+        } 
+        
+        if (user.step === 'AWAITING_PASS') {
+            user.password = text;
+            // Génération du Captcha
+            const n1 = Math.floor(Math.random() * 10);
+            const n2 = Math.floor(Math.random() * 10);
+            user.captchaAnswer = n1 + n2;
+            user.step = 'AWAITING_CAPTCHA';
+            await user.save();
+            return sendText(psid, `🤖 Vérification : Combien font ${n1} + ${n2} ?`);
+        }
+
+        if (user.step === 'AWAITING_CAPTCHA') {
+            if (parseInt(text) === user.captchaAnswer) {
+                user.isRegistered = true;
+                user.step = 'IDLE';
+                await user.save();
+                sendText(psid, "✅ Inscription validée ! Bienvenue chez ProxyFlow.");
+                return sendWelcomeMessage(psid);
+            } else {
+                return sendText(psid, "❌ Mauvaise réponse. Réessayez le calcul.");
+            }
+        }
+        
+        return sendSignupPrompt(psid);
+    }
+
+    // Si déjà inscrit, renvoyer le menu principal si le texte n'est pas géré
+    sendWelcomeMessage(psid);
+}
+
+// --- GESTION DES BOUTONS ---
+async function handlePostback(psid, payload, user) {
+    if (payload === 'START_SIGNUP') {
+        user.step = 'AWAITING_EMAIL';
+        await user.save();
+        sendText(psid, "📧 Veuillez entrer votre adresse email pour créer votre compte :");
+    } else if (user.isRegistered) {
+        // Logique d'achat ici (USA -> Verizon/TMobile -> Binance/LTC)
+        if (payload === 'START_ORDER') {
+            sendOrderFlow(psid);
+        }
+    }
+}
+
+// --- FONCTIONS D'ENVOI ---
+function sendSignupPrompt(psid) {
     const response = {
         "attachment": {
             "type": "template",
             "payload": {
                 "template_type": "button",
-                "text": "Bienvenue sur ProxyFlow ! 🌐\nPour accéder à nos services, veuillez créer votre compte.",
-                "buttons": [{ "type": "postback", "title": "📝 S'inscrire maintenant", "payload": "CONFIRM_SIGNUP" }]
+                "text": "Bienvenue sur ProxyFlow ! 🌐\nVeuillez créer un compte pour continuer.",
+                "buttons": [{ "type": "postback", "title": "📝 Créer mon compte", "payload": "START_SIGNUP" }]
             }
         }
     };
-    callSendAPI(sender_psid, response);
+    callSendAPI(psid, response);
 }
 
-// LOGIQUE DES POSTBACKS
-async function handlePostback(sender_psid, payload, user) {
-    let response;
-
-    // Si l'utilisateur n'est pas inscrit, il ne peut QUE s'inscrire
-    if (!user.isRegistered && payload !== 'CONFIRM_SIGNUP') {
-        return sendSignupPrompt(sender_psid);
-    }
-
-    switch (payload) {
-        case 'CONFIRM_SIGNUP':
-            await User.findOneAndUpdate({ psid: sender_psid }, { isRegistered: true });
-            response = { "text": "✅ Inscription réussie ! Vous pouvez maintenant acheter des proxys." };
-            callSendAPI(sender_psid, response);
-            setTimeout(() => sendWelcomeMessage(sender_psid), 1000);
-            return;
-
-        case 'START_ORDER':
-            response = {
-                "attachment": {
-                    "type": "template",
-                    "payload": {
-                        "template_type": "button",
-                        "text": "🌍 Choisissez le pays :",
-                        "buttons": [{ "type": "postback", "title": "🇺🇸 USA", "payload": "SELECT_USA" }]
-                    }
-                }
-            };
-            break;
-
-        case 'SELECT_USA':
-            response = {
-                "attachment": {
-                    "type": "template",
-                    "payload": {
-                        "template_type": "button",
-                        "text": "📶 Choisissez votre fournisseur (4$) :",
-                        "buttons": [
-                            { "type": "postback", "title": "Verizon", "payload": "PAY_VERIZON" },
-                            { "type": "postback", "title": "T-Mobile", "payload": "PAY_TMOBILE" }
-                        ]
-                    }
-                }
-            };
-            break;
-
-        // ... (Ajouter ici les cas INFO_BINANCE et INFO_LTC du code précédent)
-    }
-    callSendAPI(sender_psid, response);
+function sendText(psid, text) {
+    callSendAPI(psid, { "text": text });
 }
 
-function sendWelcomeMessage(sender_psid) {
+function sendWelcomeMessage(psid) {
     const response = {
         "attachment": {
             "type": "template",
             "payload": {
                 "template_type": "button",
-                "text": "ProxyFlow 🌐 | Votre compte est actif.\nQue souhaitez-vous faire ?",
+                "text": "ProxyFlow 🌐 | Menu Principal\nCompte actif.",
                 "buttons": [
                     { "type": "postback", "title": "🛒 Acheter un proxy", "payload": "START_ORDER" },
                     { "type": "postback", "title": "📞 Support", "payload": "SUPPORT" }
@@ -138,7 +129,7 @@ function sendWelcomeMessage(sender_psid) {
             }
         }
     };
-    callSendAPI(sender_psid, response);
+    callSendAPI(psid, response);
 }
 
 function callSendAPI(sender_psid, response) {
@@ -148,4 +139,8 @@ function callSendAPI(sender_psid, response) {
     }).catch(err => console.error("Erreur API:", err.response.data));
 }
 
-app.listen(process.env.PORT || 3000, () => console.log(`ProxyFlow avec MongoDB est prêt !`));
+app.get('/webhook', (req, res) => {
+    if (req.query['hub.verify_token'] === VERIFY_TOKEN) res.status(200).send(req.query['hub.challenge']);
+});
+
+app.listen(3000, () => console.log("Serveur prêt avec Captcha et Login !"));
