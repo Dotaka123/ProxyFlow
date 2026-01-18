@@ -15,9 +15,11 @@ mongoose.connect(MONGO_URI).then(() => console.log("✅ MongoDB Connecté"));
 // --- MODÈLES ---
 const User = mongoose.model('User', new mongoose.Schema({
     psid: { type: String, unique: true },
-    email: String, password: String,
+    email: String, 
+    password: String,
     balance: { type: Number, default: 0 },
     isLoggedIn: { type: Boolean, default: false },
+    isRegistered: { type: Boolean, default: false },
     step: { type: String, default: 'IDLE' },
     captchaAnswer: Number
 }));
@@ -25,16 +27,20 @@ const User = mongoose.model('User', new mongoose.Schema({
 const Deposit = mongoose.model('Deposit', new mongoose.Schema({
     psid: String,
     binanceId: String,
-    amount: { type: Number, default: 0 },
-    status: { type: String, default: 'EN_ATTENTE' }, // EN_ATTENTE, VALIDÉ
+    status: { type: String, default: 'EN_ATTENTE' },
     date: { type: Date, default: Date.now }
 }));
 
 // --- WEBHOOK ---
+app.get('/webhook', (req, res) => {
+    if (req.query['hub.verify_token'] === VERIFY_TOKEN) res.status(200).send(req.query['hub.challenge']);
+});
+
 app.post('/webhook', async (req, res) => {
     let body = req.body;
     if (body.object === 'page') {
         for (const entry of body.entry) {
+            if (!entry.messaging) continue;
             let event = entry.messaging[0];
             let psid = event.sender.id;
             let user = await User.findOne({ psid }) || await User.create({ psid });
@@ -49,91 +55,142 @@ app.post('/webhook', async (req, res) => {
     }
 });
 
+// --- GESTION DES MESSAGES (TEXTE) ---
 async function handleMessage(psid, text, user) {
-    // Logique Login/Signup (Identique précédent)
-    if (user.step.startsWith('SIGNUP_') || user.step.startsWith('LOGIN_')) {
-        return handleAuthSteps(psid, text, user); 
+    // 1. ÉTAPES D'INSCRIPTION (SIGNUP)
+    if (user.step === 'SIGNUP_EMAIL') {
+        user.email = text;
+        user.step = 'SIGNUP_PASS';
+        await user.save();
+        return sendText(psid, "🔐 Choisissez un mot de passe :");
+    } 
+    if (user.step === 'SIGNUP_PASS') {
+        user.password = text;
+        const n1 = Math.floor(Math.random() * 10), n2 = Math.floor(Math.random() * 10);
+        user.captchaAnswer = n1 + n2;
+        user.step = 'SIGNUP_CAPTCHA';
+        await user.save();
+        return sendText(psid, `🤖 Captcha : Combien font ${n1} + ${n2} ?`);
+    }
+    if (user.step === 'SIGNUP_CAPTCHA') {
+        if (parseInt(text) === user.captchaAnswer) {
+            user.isRegistered = true;
+            user.isLoggedIn = true;
+            user.step = 'IDLE';
+            await user.save();
+            sendText(psid, "✅ Compte créé et connecté !");
+            return sendWelcomeMenu(psid, user);
+        }
+        return sendText(psid, "❌ Erreur de calcul. Réessayez.");
     }
 
-    // Étape : Réception de l'ID Binance pour dépôt
+    // 2. ÉTAPES DE CONNEXION (LOGIN)
+    if (user.step === 'LOGIN_EMAIL') {
+        const foundUser = await User.findOne({ email: text });
+        if (foundUser) {
+            user.step = 'LOGIN_PASS';
+            user.email = text; 
+            await user.save();
+            return sendText(psid, "🔑 Entrez votre mot de passe :");
+        }
+        return sendText(psid, "❌ Cet email n'existe pas. Réessayez ou créez un compte.");
+    }
+    if (user.step === 'LOGIN_PASS') {
+        const account = await User.findOne({ email: user.email, password: text });
+        if (account) {
+            user.isLoggedIn = true;
+            user.step = 'IDLE';
+            await user.save();
+            sendText(psid, "🔓 Connexion réussie !");
+            return sendWelcomeMenu(psid, user);
+        }
+        return sendText(psid, "❌ Mot de passe incorrect.");
+    }
+
+    // 3. ÉTAPE DE DÉPÔT BINANCE
     if (user.step === 'AWAITING_DEPOSIT_ID') {
         await Deposit.create({ psid: psid, binanceId: text });
         user.step = 'IDLE';
         await user.save();
-        return sendText(psid, `✅ Merci ! Votre ID Binance (${text}) a été transmis. \nUn administrateur créditera votre solde après vérification du transfert de 4$ ou plus.`);
+        return sendText(psid, `✅ ID Binance (${text}) reçu ! Un admin créditera votre solde après vérification.`);
     }
 
+    // Sécurité : Si non connecté, forcer Auth
     if (!user.isLoggedIn) return sendAuthPrompt(psid);
+    
     sendWelcomeMenu(psid, user);
 }
 
+// --- GESTION DES BOUTONS (POSTBACKS) ---
 async function handlePostback(psid, payload, user) {
-    if (!user.isLoggedIn && !['GOTO_SIGNUP', 'GOTO_LOGIN'].includes(payload)) return sendAuthPrompt(psid);
+    if (payload === 'GOTO_SIGNUP') {
+        user.step = 'SIGNUP_EMAIL'; await user.save();
+        return sendText(psid, "📧 Entrez votre email :");
+    }
+    if (payload === 'GOTO_LOGIN') {
+        user.step = 'LOGIN_EMAIL'; await user.save();
+        return sendText(psid, "📧 Entrez votre email :");
+    }
+
+    if (!user.isLoggedIn) return sendAuthPrompt(psid);
 
     switch (payload) {
         case 'ADD_FUNDS':
-            sendText(psid, "💰 Pour recharger votre compte (Min 4$) :\n\n1. Envoyez vos USDT vers Binance ID : 1192024137\n2. Une fois fait, ENVOYEZ VOTRE ID BINANCE ici même.");
+            sendText(psid, "💰 Rechargement (Min 4$)\n\n1. Envoyez USDT -> Binance ID: 1192024137\n2. Tapez votre ID BINANCE ici.");
             user.step = 'AWAITING_DEPOSIT_ID';
             await user.save();
             break;
-
         case 'START_ORDER':
-            if (user.balance < 4) return sendText(psid, `❌ Solde insuffisant (${user.balance}$). Veuillez recharger votre compte.`);
-            sendButtons(psid, "🌍 Choisissez le pays :", [{ "title": "🇺🇸 USA", "payload": "BUY_USA" }]);
+            if (user.balance < 4) return sendText(psid, `❌ Solde insuffisant (${user.balance}$).`);
+            sendButtons(psid, "🌍 Étape 1 : Pays", [{ "title": "🇺🇸 USA", "payload": "BUY_USA" }]);
             break;
-
         case 'BUY_USA':
-            sendButtons(psid, "📶 Fournisseur (4$ /unité) :", [
-                { "title": "Verizon", "payload": "CONFIRM_BUY_Verizon" },
-                { "title": "T-Mobile", "payload": "CONFIRM_BUY_T-Mobile" }
+            sendButtons(psid, "📶 Étape 2 : Fournisseur (4$)", [
+                { "title": "Verizon", "payload": "CONF_Verizon" },
+                { "title": "T-Mobile", "payload": "CONF_TMobile" }
             ]);
             break;
-
-        case payload.startsWith('CONFIRM_BUY_') ? payload : null:
-            const provider = payload.replace('CONFIRM_BUY_', '');
+        case 'CONF_Verizon':
+        case 'CONF_TMobile':
             if (user.balance >= 4) {
-                user.balance -= 4;
-                await user.save();
-                sendText(psid, `✅ Achat réussi ! 1 Proxy ISP USA (${provider}) a été débité de votre solde.\n\nVotre nouveau solde : ${user.balance}$\n\n🚀 Vos accès arrivent dans quelques instants.`);
-                // Ici tu pourrais notifier ton admin pour livrer
+                user.balance -= 4; await user.save();
+                sendText(psid, `✅ Achat réussi ! Nouveau solde : ${user.balance}$`);
             }
             break;
-
         case 'MY_ACCOUNT':
-            sendText(psid, `👤 Compte : ${user.email}\n💰 Solde actuel : ${user.balance}$`);
+            sendText(psid, `👤 ${user.email}\n💰 Solde : ${user.balance}$`);
             break;
-            
-        case 'GOTO_SIGNUP': user.step = 'SIGNUP_EMAIL'; await user.save(); sendText(psid, "📧 Email :"); break;
-        case 'GOTO_LOGIN': user.step = 'LOGIN_EMAIL'; await user.save(); sendText(psid, "📧 Email :"); break;
     }
 }
 
 // --- HELPERS ---
-function sendWelcomeMenu(psid, user) {
-    sendButtons(psid, `ProxyFlow 🌐 | Solde: ${user.balance}$`, [
-        { "title": "🛒 Acheter Proxy", "payload": "START_ORDER" },
-        { "title": "💰 Recharger", "payload": "ADD_FUNDS" },
-        { "title": "👤 Mon Compte", "payload": "MY_ACCOUNT" }
+function sendAuthPrompt(psid) {
+    sendButtons(psid, "ProxyFlow 🌐 | Identifiez-vous :", [
+        { "title": "📝 S'inscrire", "payload": "GOTO_SIGNUP" },
+        { "title": "🔑 Se connecter", "payload": "GOTO_LOGIN" }
     ]);
 }
 
-function sendAuthPrompt(psid) {
-    sendButtons(psid, "ProxyFlow 🌐 | Bienvenue", [
-        { "title": "📝 S'inscrire", "payload": "GOTO_SIGNUP" },
-        { "title": "🔑 Connexion", "payload": "GOTO_LOGIN" }
+function sendWelcomeMenu(psid, user) {
+    sendButtons(psid, `Menu ProxyFlow 🌐 (Solde: ${user.balance}$)`, [
+        { "title": "🛒 Acheter", "payload": "START_ORDER" },
+        { "title": "💰 Recharger", "payload": "ADD_FUNDS" },
+        { "title": "👤 Compte", "payload": "MY_ACCOUNT" }
     ]);
 }
 
 function sendText(psid, text) { callSendAPI(psid, { "text": text }); }
+
 function sendButtons(psid, text, btns) {
     const buttons = btns.map(b => ({ "type": "postback", "title": b.title, "payload": b.payload }));
     callSendAPI(psid, { "attachment": { "type": "template", "payload": { "template_type": "button", "text": text, "buttons": buttons } } });
 }
-function callSendAPI(psid, response) {
-    axios.post(`https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, { recipient: { id: psid }, message: response });
+
+function callSendAPI(sender_psid, response) {
+    axios.post(`https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, {
+        recipient: { id: sender_psid },
+        message: response
+    }).catch(err => console.error("❌ Erreur API"));
 }
 
-// Note: handleAuthSteps doit contenir la logique d'email/pass/captcha des messages précédents.
-
-app.get('/webhook', (req, res) => { if (req.query['hub.verify_token'] === VERIFY_TOKEN) res.status(200).send(req.query['hub.challenge']); });
-app.listen(3000, () => console.log("🚀 ProxyFlow avec Système de Balance actif !"));
+app.listen(3000, () => console.log("🚀 ProxyFlow v3.1 Corrigé !"));
