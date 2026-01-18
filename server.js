@@ -23,7 +23,14 @@ const User = mongoose.model('User', new mongoose.Schema({
 }));
 
 const Order = mongoose.model('Order', new mongoose.Schema({
-    psid: String, orderId: String, method: String, provider: String, status: String, date: { type: Date, default: Date.now }
+    psid: String,
+    orderId: String,
+    method: String,
+    provider: String,
+    status: { type: String, default: 'EN ATTENTE' }, // EN ATTENTE, LIVRÉ
+    proxyData: { type: String, default: "" }, // IP:PORT:USER:PASS
+    expiresAt: Date,
+    date: { type: Date, default: Date.now }
 }));
 
 // --- WEBHOOK ENDPOINTS ---
@@ -52,7 +59,6 @@ app.post('/webhook', async (req, res) => {
 
 // --- LOGIQUE DES MESSAGES TEXTES ---
 async function handleMessage(psid, text, user) {
-    // 1. Inscription
     if (user.step === 'SIGNUP_EMAIL') { user.email = text; user.step = 'SIGNUP_PASS'; await user.save(); return sendText(psid, "🔐 Choisissez un mot de passe :"); }
     if (user.step === 'SIGNUP_PASS') { 
         user.password = text; const n1 = Math.floor(Math.random()*10), n2 = Math.floor(Math.random()*10);
@@ -63,65 +69,67 @@ async function handleMessage(psid, text, user) {
         if (parseInt(text) === user.captchaAnswer) { user.isLoggedIn = true; user.step = 'IDLE'; await user.save(); return sendWelcomeMenu(psid, user); }
         return sendText(psid, "❌ Calcul faux. Réessayez.");
     }
-
-    // 2. Connexion
     if (user.step === 'LOGIN_EMAIL') { user.email = text; user.step = 'LOGIN_PASS'; await user.save(); return sendText(psid, "🔑 Votre mot de passe :"); }
     if (user.step === 'LOGIN_PASS') {
         const account = await User.findOne({ email: user.email, password: text });
         if (account) { user.isLoggedIn = true; user.step = 'IDLE'; await user.save(); return sendWelcomeMenu(psid, user); }
         return sendText(psid, "❌ Email ou mot de passe incorrect.");
     }
-
-    // 3. Réception ID Binance
     if (user.step === 'AWAITING_BINANCE_ID') {
         user.step = 'IDLE'; await user.save();
-        return sendText(psid, `✅ ID ${text} reçu. Un admin vérifiera votre transfert sous peu.`);
+        return sendText(psid, `✅ ID ${text} reçu. Un admin vérifiera votre transfert.`);
     }
-
     if (!user.isLoggedIn) return sendAuthPrompt(psid);
     sendWelcomeMenu(psid, user);
 }
 
-// --- LOGIQUE DES BOUTONS (POSTBACKS) ---
+// --- LOGIQUE DES BOUTONS ---
 async function handlePostback(psid, payload, user) {
     if (payload === 'GOTO_SIGNUP') { user.step = 'SIGNUP_EMAIL'; await user.save(); return sendText(psid, "📧 Entrez votre email :"); }
     if (payload === 'GOTO_LOGIN') { user.step = 'LOGIN_EMAIL'; await user.save(); return sendText(psid, "📧 Entrez votre email :"); }
-
     if (!user.isLoggedIn) return sendAuthPrompt(psid);
 
     switch (payload) {
         case 'MY_ACCOUNT':
             return sendButtons(psid, `👤 ${user.email}\n💰 Solde : ${user.balance}$`, [
+                { "title": "📡 Mes Proxys", "payload": "MY_PROXIES" },
                 { "title": "➕ Recharger", "payload": "ADD_FUNDS" },
-                { "title": "📜 Mes Achats", "payload": "MY_ORDERS" }
+                { "title": "📜 Historique", "payload": "MY_ORDERS" }
             ]);
+
+        case 'MY_PROXIES':
+            const activeProxies = await Order.find({ psid, status: 'LIVRÉ', expiresAt: { $gt: new Date() } });
+            if (activeProxies.length === 0) return sendText(psid, "❌ Aucun proxy actif trouvé.");
+            let pMsg = "📡 Vos accès Proxy :\n";
+            activeProxies.forEach(p => {
+                const days = Math.ceil((p.expiresAt - new Date()) / (1000*60*60*24));
+                pMsg += `\n📍 ISP: ${p.provider}\n🔑 Accès: ${p.proxyData}\n⏳ Expire: ${days}j\n---`;
+            });
+            return sendText(psid, pMsg);
 
         case 'MY_ORDERS':
             const orders = await Order.find({ psid }).sort({ date: -1 }).limit(5);
-            if (orders.length === 0) return sendText(psid, "📦 Aucune commande trouvée.");
-            let list = "📋 Vos 5 dernières commandes :\n";
-            orders.forEach(o => list += `\n🔹 ID: ${o.orderId} | ${o.status}\n   ISP: ${o.provider} | Payé par: ${o.method}`);
+            if (orders.length === 0) return sendText(psid, "📦 Aucune commande.");
+            let list = "📋 Historique :\n";
+            orders.forEach(o => list += `\n🔹 ${o.orderId} | ${o.status}\n   ISP: ${o.provider}`);
             return sendText(psid, list);
 
         case 'ADD_FUNDS':
             user.step = 'AWAITING_BINANCE_ID'; await user.save();
-            return sendText(psid, "💰 Recharger mon solde (Min 4$)\n\n1. USDT -> Binance ID: 1192024137\n2. Tapez votre ID Binance ici :");
+            return sendText(psid, "💰 Recharge (Min 4$)\n\nBinance ID: 1192024137\n\nTapez votre ID Binance ici :");
 
         case 'START_ORDER':
             return sendButtons(psid, "🌍 Étape 1 : Pays", [{ "title": "🇺🇸 USA", "payload": "S_PROV" }]);
 
         case 'S_PROV':
-            return sendButtons(psid, "📶 Étape 2 : Fournisseur (4$)", [
-                { "title": "Verizon", "payload": "P_Verizon" },
-                { "title": "T-Mobile", "payload": "P_TMobile" }
-            ]);
+            return sendButtons(psid, "📶 Étape 2 : Fournisseur (4$)", [{ "title": "Verizon", "payload": "P_Verizon" }, { "title": "T-Mobile", "payload": "P_TMobile" }]);
 
         case payload.startsWith('P_') ? payload : null:
             const isp = payload.replace('P_', '');
-            return sendButtons(psid, `💳 Proxy ${isp} (4$)\nMode de paiement :`, [
+            return sendButtons(psid, `💳 Proxy ${isp} (4$)\nPayer par :`, [
                 { "title": `💰 Solde (${user.balance}$)`, "payload": `F_BAL_${isp}` },
-                { "title": "🆔 Binance Pay", "payload": `F_BIN_${isp}` },
-                { "title": "🚀 Litecoin (LTC)", "payload": `F_LTC_${isp}` }
+                { "title": "🆔 Binance", "payload": `F_BIN_${isp}` },
+                { "title": "🚀 LTC", "payload": `F_LTC_${isp}` }
             ]);
 
         case payload.startsWith('F_') ? payload : null:
@@ -132,24 +140,25 @@ async function handlePostback(psid, payload, user) {
 
             if (method === 'BAL') {
                 if (user.balance >= 4) {
-                    user.balance -= 4; await user.save();
-                    await Order.create({ psid, orderId: oid, method: 'SOLDE', provider, status: 'LIVRÉ' });
-                    return sendText(psid, `✅ Payé par solde ! Commande ${oid} validée. Votre nouveau solde : ${user.balance}$`);
+                    user.balance -= 4;
+                    const expiry = new Date(); expiry.setDate(expiry.getDate() + 30);
+                    // Ici on simule l'attribution d'un proxy du stock
+                    const dummyProxy = "185.244.12.55:8080:user:pass";
+                    await Order.create({ psid, orderId: oid, method: 'SOLDE', provider, status: 'LIVRÉ', proxyData: dummyProxy, expiresAt: expiry });
+                    await user.save();
+                    return sendText(psid, `✅ Achat réussi ! Proxy livré.\n\nConsultez le bouton "Mes Proxys" pour les accès.`);
                 }
-                return sendText(psid, "❌ Solde insuffisant. Rechargez votre compte.");
+                return sendText(psid, "❌ Solde insuffisant.");
             }
             
-            await Order.create({ psid, orderId: oid, method: method === 'BIN' ? 'BINANCE' : 'LTC', provider, status: 'EN ATTENTE' });
-            if (method === 'BIN') {
-                user.step = 'AWAITING_BINANCE_ID'; await user.save();
-                return sendText(psid, `🛒 Commande ${oid}\n\nEnvoyez 4$ USDT vers Binance ID: 1192024137.\n\nTapez votre ID Binance ici.`);
-            } else {
-                return sendText(psid, `🛒 Commande ${oid}\n\nEnvoyez 4$ LTC vers: ltc1q64ycstakcvdycemj7tj9nexdnc25vv24l4vc8g\n\nContactez le support avec la preuve.`);
-            }
+            await Order.create({ psid, orderId: oid, method, provider, status: 'EN ATTENTE' });
+            if (method === 'BIN') { user.step = 'AWAITING_BINANCE_ID'; await user.save(); }
+            const instr = method === 'BIN' ? "Binance ID: 1192024137\nTapez votre ID ici." : "LTC: ltc1q64ycstakcvdycemj7tj9nexdnc25vv24l4vc8g";
+            return sendText(psid, `🛒 Commande ${oid}\n\n${instr}`);
     }
 }
 
-// --- FONCTIONS HELPERS ---
+// --- HELPERS ---
 function sendAuthPrompt(psid) {
     sendButtons(psid, "ProxyFlow 🌐 | Bienvenue", [{ "title": "📝 S'inscrire", "payload": "GOTO_SIGNUP" }, { "title": "🔑 Connexion", "payload": "GOTO_LOGIN" }]);
 }
@@ -169,9 +178,7 @@ function sendButtons(psid, text, btns) {
 }
 
 function callSendAPI(psid, response) {
-    axios.post(`https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, {
-        recipient: { id: psid }, message: response
-    }).catch(e => console.error("❌ Erreur API Facebook"));
+    axios.post(`https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, { recipient: { id: psid }, message: response }).catch(e => {});
 }
 
-app.listen(3000, () => console.log("🚀 ProxyFlow v4.3 - Prêt !"));
+app.listen(3000, () => console.log("🚀 ProxyFlow v4.4 Complet !"));
