@@ -137,8 +137,9 @@ async function handlePostback(psid, payload, user) {
         ]);
     }
 
+    // --- INFOS PROXIES AJOUTÉES ICI ---
     if (payload === 'MENU_PAID') {
-        return sendButtons(psid, "Residential (0 Fraud):", [
+        return sendButtons(psid, "🚀 RESIDENTIAL (0 FRAUD SCORE)\n\n• Static ISP: High speed, 1-month duration.\n• Virgin Resi: Never used, perfect for social media.\n• Verizon: Top tier US mobile provider.", [
             { "title": "Static ISP ($6)", "payload": "BUY_STATIC_6" },
             { "title": "Virgin Resi ($6)", "payload": "BUY_VIRGIN_6" },
             { "title": "Verizon ($4.5)", "payload": "BUY_VERIZON_4.5" }
@@ -149,7 +150,7 @@ async function handlePostback(psid, payload, user) {
         const [_, item, price] = payload.split('_');
         user.selectedItem = item; user.selectedPrice = parseFloat(price);
         user.step = 'ASK_QUANTITY'; await user.save();
-        return sendText(psid, `How many ${item} proxies?`);
+        return sendText(psid, `How many ${item} proxies do you want?`);
     }
 
     if (payload.startsWith('CONFIRM_PAY_')) {
@@ -163,8 +164,6 @@ async function handlePostback(psid, payload, user) {
             await user.save();
             return sendText(psid, `✅ Order ${oid} placed using your balance!`);
         } else {
-            // --- NOUVELLE LOGIQUE : PAS DE BLOCAGE ---
-            // On crée quand même la commande en statut "Manual Payment"
             await Order.create({ psid, orderId: oid, provider: `${qty}x ${user.selectedItem} (Manual)`, price: cost, status: 'WAITING PAYMENT' });
             return sendButtons(psid, `💳 ORDER PENDING\n\nTotal: $${cost.toFixed(2)}\n\nYou don't have enough balance, but you can pay directly to support via Binance or LTC to get your proxies!`, [
                 { "title": "👨‍💻 Pay via Support", "url": SUPPORT_LINK },
