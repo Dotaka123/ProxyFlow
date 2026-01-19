@@ -153,7 +153,7 @@ async function handlePostback(psid, payload, user) {
     }
 
     if (payload === 'ADD_FUNDS') {
-        return sendButtons(psid, "💳 Min deposit: $10\nSend to Binance ID or LTC.\nContact support with proof.", [{ "title": "👨‍💻 Support", "url": SUPPORT_LINK }]);
+        return sendButtons(psid, "💳 Min deposit: $5\nSend to Binance ID or LTC.\nContact support with proof.", [{ "title": "👨‍💻 Support", "url": SUPPORT_LINK }]);
     }
 
     if (payload.startsWith('CONFIRM_PAY_')) {
