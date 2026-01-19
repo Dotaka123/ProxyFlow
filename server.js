@@ -7,12 +7,10 @@ const app = express().use(bodyParser.json());
 
 // --- STATUS PAGE ---
 app.get('/', (req, res) => {
-    res.send(`
-        <body style="background:#121212;color:white;text-align:center;padding-top:100px;font-family:sans-serif;">
-            <h1 style="color:#2ecc71;">● ProxyFlow Bot is Online</h1>
-            <p>Residential Proxies - 0 Fraud Score</p>
-        </body>
-    `);
+    res.send(`<body style="background:#121212;color:white;text-align:center;padding-top:100px;font-family:sans-serif;">
+        <h1 style="color:#2ecc71;">● ProxyFlow Bot is Online</h1>
+        <p>Residential Proxies - 0 Fraud Score</p>
+    </body>`);
 });
 
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
@@ -25,7 +23,8 @@ mongoose.connect(MONGO_URI);
 const User = mongoose.model('User', new mongoose.Schema({
     psid: { type: String, unique: true }, email: String, password: String,
     balance: { type: Number, default: 0 }, isLoggedIn: { type: Boolean, default: false },
-    step: { type: String, default: 'IDLE' }, selectedItem: String, selectedPrice: Number
+    step: { type: String, default: 'IDLE' }, selectedItem: String, selectedPrice: Number,
+    captchaCode: String // Stocke le captcha temporaire
 }));
 
 const Order = mongoose.model('Order', new mongoose.Schema({
@@ -37,25 +36,43 @@ const Settings = mongoose.model('Settings', new mongoose.Schema({ key: String, v
 
 // --- MESSAGE LOGIC ---
 async function handleMessage(psid, text, user) {
-    if (text === "Return to main menu") return sendMenu(psid, user);
+    if (text === "Return to main menu") { user.step = 'IDLE'; await user.save(); return sendMenu(psid, user); }
 
+    // --- SIGNUP FLOW WITH CAPTCHA ---
     if (user.step === 'SIGNUP_EMAIL') {
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         if (!emailRegex.test(text.trim())) return sendText(psid, "❌ Invalid email. Please enter a real email:");
+        
+        // Génération du Captcha
+        const captcha = Math.random().toString(36).substring(2, 8).toUpperCase(); // Exemple: A1B2C3
         user.email = text.trim().toLowerCase();
-        user.step = 'SIGNUP_PASS'; await user.save();
-        return sendText(psid, "🔐 Choose a password (min. 6 characters):");
+        user.captchaCode = captcha;
+        user.step = 'VERIFY_CAPTCHA'; 
+        await user.save();
+
+        return sendText(psid, `🤖 SECURITY CHECK\n\nPlease type the following code to prove you are human:\n\n👉 **${captcha}**`);
     }
+
+    if (user.step === 'VERIFY_CAPTCHA') {
+        if (text.trim().toUpperCase() === user.captchaCode) {
+            user.step = 'SIGNUP_PASS'; await user.save();
+            return sendText(psid, "✅ Captcha correct! Now choose a password (min. 6 characters):");
+        } else {
+            const newCaptcha = Math.random().toString(36).substring(2, 8).toUpperCase();
+            user.captchaCode = newCaptcha; await user.save();
+            return sendText(psid, `❌ Wrong code. Try again with this one:\n\n👉 **${newCaptcha}**`);
+        }
+    }
+
     if (user.step === 'SIGNUP_PASS') {
         if (text.length < 6) return sendText(psid, "⚠️ Password too short! Min 6 characters:");
         user.password = text.trim();
         user.isLoggedIn = true; user.step = 'IDLE'; await user.save();
-        return sendText(psid, "✅ Registration successful! Welcome.");
+        return sendText(psid, "✅ Registration successful! Welcome to ProxyFlow.");
     }
 
+    // --- LOGIN ---
     if (user.step === 'LOGIN_EMAIL') {
-        const check = await User.findOne({ email: text.trim().toLowerCase() });
-        if (!check) return sendText(psid, "❌ Email not found.");
         user.email = text.trim().toLowerCase();
         user.step = 'LOGIN_PASS'; await user.save();
         return sendText(psid, "🔐 Enter your password:");
@@ -68,10 +85,10 @@ async function handleMessage(psid, text, user) {
         } else return sendText(psid, "❌ Wrong password.");
     }
 
+    // --- SHOP ---
     if (user.step === 'ASK_QUANTITY') {
         const qty = parseInt(text);
         if (isNaN(qty) || qty <= 0) return sendText(psid, "❌ Enter a valid number.");
-        if (user.selectedItem === 'VIRGIN' && qty < 10) return sendText(psid, "⚠️ Min: 10 pieces for Virgin Residential.");
         const total = qty * user.selectedPrice;
         user.step = 'IDLE'; await user.save();
         return sendButtons(psid, `🛒 Order: ${qty}x ${user.selectedItem}\n💰 Total: $${total.toFixed(2)}`, [
@@ -84,27 +101,43 @@ async function handleMessage(psid, text, user) {
     sendMenu(psid, user);
 }
 
-// --- BUTTON LOGIC ---
+// --- POSTBACK HANDLING ---
 async function handlePostback(psid, payload, user) {
     if (payload === 'GOTO_SIGNUP') { user.step = 'SIGNUP_EMAIL'; await user.save(); return sendText(psid, "📧 Enter Email:"); }
     if (payload === 'GOTO_LOGIN') { user.step = 'LOGIN_EMAIL'; await user.save(); return sendText(psid, "📧 Enter Email:"); }
     
-    if (payload === 'FREE_PROXY') {
-        const data = await Settings.findOne({ key: 'free_proxies' });
-        const freeText = data ? data.value : "🚫 No free proxies available right now.";
-        return sendText(psid, "🎁 FREE RESIDENTIAL PROXIES (Might be slow):\n\n" + freeText);
-    }
-
-    if (!user.isLoggedIn) return sendAuth(psid);
-
-    if (payload === 'GOTO_SIGNOUT') {
-        user.isLoggedIn = false; user.step = 'IDLE'; await user.save();
-        sendText(psid, "👋 Logged out!");
+    if (!user.isLoggedIn) {
+        if (payload === 'FREE_PROXY') {
+            const data = await Settings.findOne({ key: 'free_proxies' });
+            return sendText(psid, "🎁 FREE PROXIES:\n\n" + (data ? data.value : "None available."));
+        }
         return sendAuth(psid);
     }
 
+    if (payload === 'MY_ACCOUNT') {
+        return sendButtons(psid, `👤 ${user.email}\n💰 Balance: ${user.balance.toFixed(2)}$`, [
+            { "title": "➕ Add Funds", "payload": "ADD_FUNDS" },
+            { "title": "📜 Mes Proxies", "payload": "MY_ORDERS" },
+            { "title": "🚪 Sign Out", "payload": "GOTO_SIGNOUT" }
+        ]);
+    }
+
+    if (payload === 'ADD_FUNDS') {
+        return sendButtons(psid, "💳 Minimum deposit: $5.00\nSend via Binance ID or LTC.\nContact support with proof.", [{ "title": "👨‍💻 Support", "url": SUPPORT_LINK }]);
+    }
+
+    if (payload === 'MY_ORDERS') {
+        const orders = await Order.find({ psid }).sort({ date: -1 }).limit(5);
+        if (orders.length === 0) return sendText(psid, "📦 No proxies found in your account.");
+        let msg = "📬 Your Latest Proxies:\n\n";
+        orders.forEach(o => {
+            msg += `🆔 ID: ${o.orderId}\nStatus: ${o.status}\nProxy: ${o.proxyData || 'Pending...'}\n---\n`;
+        });
+        return sendText(psid, msg);
+    }
+
     if (payload === 'START_ORDER') {
-        return sendButtons(psid, "🌍 Select Category (0 Fraud Score):", [
+        return sendButtons(psid, "🌍 Select Category:", [
             { "title": "⚡ Paid Proxies", "payload": "MENU_PAID" },
             { "title": "🎁 Free Proxy", "payload": "FREE_PROXY" }
         ]);
@@ -112,48 +145,17 @@ async function handlePostback(psid, payload, user) {
 
     if (payload === 'MENU_PAID') {
         return sendButtons(psid, "Select Residential Type:", [
-            { "title": "Static ISP ($6)", "payload": "MENU_STATIC" },
-            { "title": "Virgin Resi ($6)", "payload": "MENU_VIRGIN" },
-            { "title": "Verizon ($4.5)", "payload": "MENU_VERIZON" }
+            { "title": "Static ISP ($6)", "payload": "BUY_STATIC_6" },
+            { "title": "Virgin Resi ($6)", "payload": "BUY_VIRGIN_6" },
+            { "title": "Verizon ($4.5)", "payload": "BUY_VERIZON_4.5" }
         ]);
-    }
-
-    if (payload.startsWith('MENU_')) {
-        const type = payload.split('_')[1];
-        const price = (type === 'VERIZON') ? '4.5' : '6.0';
-        return sendButtons(psid, `${type} Residential:`, [
-            { "title": "🛒 Buy Now", "payload": `BUY_${type}_${price}` },
-            { "title": "ℹ️ Info", "payload": `INFO_${type}` }
-        ]);
-    }
-
-    if (payload.startsWith('INFO_')) {
-        const info = { 
-            'STATIC': "⚡ STATIC ISP ($6.00):\n- Residential IP, 0 Fraud Score.\n- USA/UK/AUS - Renewable.", 
-            'VIRGIN': "🏠 VIRGIN ($6.00):\n- 100% Clean / 0 Fraud Score.\n- Residential. Min: 10 pieces.", 
-            'VERIZON': "📍 VERIZON ($4.50):\n- Static Residential / 0 Fraud Score.\n- Fast & High Anonymity." 
-        };
-        return sendText(psid, info[payload.split('_')[1]]);
     }
 
     if (payload.startsWith('BUY_')) {
         const [_, item, price] = payload.split('_');
         user.selectedItem = item; user.selectedPrice = parseFloat(price);
         user.step = 'ASK_QUANTITY'; await user.save();
-        return sendText(psid, `How many ${item} Residential proxies? ${item === 'VIRGIN' ? '(Min 10)' : ''}`);
-    }
-
-    if (payload === 'MY_ACCOUNT') {
-        let low = (user.balance < 4.5) ? "\n⚠️ Low balance!" : "";
-        return sendButtons(psid, `👤 ${user.email}\n💰 Balance: ${user.balance.toFixed(2)}$${low}`, [
-            { "title": "➕ Add Funds", "payload": "ADD_FUNDS" },
-            { "title": "📜 History", "payload": "MY_ORDERS" },
-            { "title": "🚪 Sign Out", "payload": "GOTO_SIGNOUT" }
-        ]);
-    }
-
-    if (payload === 'ADD_FUNDS') {
-        return sendButtons(psid, "💳 Min deposit: $5\nSend to Binance ID or LTC.\nContact support with proof.", [{ "title": "👨‍💻 Support", "url": SUPPORT_LINK }]);
+        return sendText(psid, `How many ${item} Residential proxies?`);
     }
 
     if (payload.startsWith('CONFIRM_PAY_')) {
@@ -162,14 +164,15 @@ async function handlePostback(psid, payload, user) {
         const oid = "PF" + Math.floor(Math.random()*99999);
         if (user.balance >= cost) {
             user.balance -= cost;
-            await Order.create({ psid, orderId: oid, provider: `${qty}x ${user.selectedItem}`, price: cost, status: 'PENDING (Balance)' });
+            await Order.create({ psid, orderId: oid, provider: `${qty}x ${user.selectedItem}`, price: cost, status: 'PENDING' });
             await user.save();
-            return sendText(psid, `✅ Order ${oid} placed via balance! Delivery soon.`);
+            return sendText(psid, `✅ Order ${oid} placed! Delivery soon in "Mes Proxies".`);
         } else {
-            await Order.create({ psid, orderId: oid, provider: `${qty}x ${user.selectedItem}`, price: cost, status: 'PENDING (Manual)' });
-            return sendButtons(psid, `📝 Order ${oid} created!\n💰 Total: $${cost.toFixed(2)}\n⚠️ Low balance. Send payment manually and contact support.`, [{"title":"👨‍💻 Support", "url": SUPPORT_LINK}]);
+            return sendButtons(psid, `⚠️ Insufficient Balance ($${cost.toFixed(2)} needed).\nPlease add at least $5.00.`, [{"title":"➕ Add Funds", "payload": "ADD_FUNDS"}]);
         }
     }
+
+    if (payload === 'GOTO_SIGNOUT') { user.isLoggedIn = false; await user.save(); return sendAuth(psid); }
 }
 
 // --- HELPERS ---
