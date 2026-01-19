@@ -10,7 +10,7 @@ app.get('/', (req, res) => res.send("🚀 ProxyFlow Bot & API is Live"));
 
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const MONGO_URI = process.env.MONGO_URI;
-const SUPPORT_LINK = "https://www.facebook.com/profile.php?id=61586969783401";
+const SUPPORT_LINK = "https://www.facebook.com/profile.php?id=61550334805446";
 
 mongoose.connect(MONGO_URI);
 
