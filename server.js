@@ -5,13 +5,7 @@ const mongoose = require('mongoose');
 
 const app = express().use(bodyParser.json());
 
-// --- AJOUT : ROUTE D'ACCUEIL POUR EVITER "CANNOT GET /" ---
-app.get('/', (req, res) => {
-    res.send(`<body style="background:#121212;color:white;text-align:center;padding-top:100px;font-family:sans-serif;">
-        <h1 style="color:#2ecc71;">● ProxyFlow Bot is Online</h1>
-        <p>Multilingual: EN | FR | MG</p>
-    </body>`);
-});
+app.get('/', (req, res) => res.send("ProxyFlow Bot Online"));
 
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const MONGO_URI = process.env.MONGO_URI;
@@ -44,22 +38,21 @@ const i18n = {
     acc: { en: "👤 Account", fr: "👤 Compte", mg: "👤 Kaonty" },
     my_proxies: { en: "📜 My Proxies", fr: "📜 Mes Proxies", mg: "📜 Ny 'Proxies'-ko" },
     add_funds: { en: "➕ Add Funds", fr: "➕ Ajouter Fonds", mg: "➕ Hampiditra vola" },
-    back: { en: "Return to main menu", fr: "Retour au menu", mg: "Hiverina amin'ny fandraisana" }
+    back: { en: "Back", fr: "Retour", mg: "Hiverina" }
 };
 
 // --- LOGIQUE MESSAGES ---
 async function handleMessage(psid, text, user) {
-    if (user.language === 'NONE') return sendLanguagePicker(psid);
+    if (!user.language || user.language === 'NONE') return sendLanguagePicker(psid);
     const lang = user.language;
 
-    if (text.toLowerCase() === "menu" || text === i18n.back[lang]) {
+    if (text.toLowerCase() === "menu") {
         user.step = 'IDLE'; await user.save();
         return user.isLoggedIn ? sendMenu(psid, user) : sendAuth(psid, user);
     }
 
+    // --- INSCRIPTION AVEC CAPTCHA ---
     if (user.step === 'SIGNUP_EMAIL') {
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (!emailRegex.test(text.trim())) return sendText(psid, user, "❌ Invalid email");
         user.email = text.trim().toLowerCase();
         user.captchaCode = Math.random().toString(36).substring(2, 7).toUpperCase();
         user.step = 'VERIFY_CAPTCHA'; await user.save();
@@ -69,17 +62,18 @@ async function handleMessage(psid, text, user) {
     if (user.step === 'VERIFY_CAPTCHA') {
         if (text.trim().toUpperCase() === user.captchaCode) {
             user.step = 'SIGNUP_PASS'; await user.save();
-            return sendText(psid, user, lang === 'mg' ? "Safidio ny tenimiafina (6 farafahakeliny):" : "Choose password (min 6):");
+            return sendText(psid, user, lang === 'mg' ? "Safidio ny tenimiafina (6 farafahakeliny):" : "Password (min 6):");
         }
-        return sendText(psid, user, "❌ Wrong CAPTCHA");
+        return sendText(psid, user, "❌ Wrong CAPTCHA. Try again:");
     }
 
     if (user.step === 'SIGNUP_PASS') {
-        if (text.length < 6) return sendText(psid, user, "⚠️ Short!");
+        if (text.length < 6) return sendText(psid, user, "⚠️ Too short!");
         user.password = text.trim(); user.isLoggedIn = true; user.step = 'IDLE'; await user.save();
         return sendMenu(psid, user);
     }
 
+    // --- CONNEXION ---
     if (user.step === 'LOGIN_EMAIL') {
         user.email = text.trim().toLowerCase();
         user.step = 'LOGIN_PASS'; await user.save();
@@ -92,9 +86,10 @@ async function handleMessage(psid, text, user) {
             user.isLoggedIn = true; user.step = 'IDLE'; await user.save();
             return sendMenu(psid, user);
         }
-        return sendText(psid, user, "❌ Error");
+        return sendText(psid, user, "❌ Login failed.");
     }
 
+    // --- QUANTITÉ ---
     if (user.step === 'ASK_QUANTITY') {
         const qty = parseInt(text);
         if (isNaN(qty) || qty <= 0) return sendText(psid, user, "❌ Error");
@@ -118,16 +113,12 @@ async function handlePostback(psid, payload, user) {
         return user.isLoggedIn ? sendMenu(psid, user) : sendAuth(psid, user);
     }
 
-    if (user.language === 'NONE') return sendLanguagePicker(psid);
+    if (!user.language || user.language === 'NONE') return sendLanguagePicker(psid);
     const lang = user.language;
 
     if (payload === 'GOTO_SIGNUP') { user.step = 'SIGNUP_EMAIL'; await user.save(); return sendText(psid, user, "📧 Email:"); }
     if (payload === 'GOTO_LOGIN') { user.step = 'LOGIN_EMAIL'; await user.save(); return sendText(psid, user, "📧 Email:"); }
     if (payload === 'CHANGE_LANG') return sendLanguagePicker(psid);
-    if (payload === 'FREE_PROXY') {
-        const data = await Settings.findOne({ key: 'free_proxies' });
-        return sendText(psid, user, (data ? data.value : "..."));
-    }
 
     if (payload === 'START_ORDER') {
         return sendButtons(psid, user, "Category:", [
@@ -164,23 +155,12 @@ async function handlePostback(psid, payload, user) {
         ]);
     }
 
-    if (payload === 'ADD_FUNDS') {
-        return sendButtons(psid, user, "Binance or LTC. Send proof to support.", [{ "title": "👨‍💻 Support", "url": SUPPORT_LINK }]);
-    }
-
     if (payload.startsWith('CONFIRM_PAY_')) {
         const [,, qty, total] = payload.split('_');
         const cost = parseFloat(total);
         const oid = "PF" + Math.floor(Math.random()*99999);
-        if (user.balance >= cost) {
-            user.balance -= cost;
-            await Order.create({ psid, orderId: oid, provider: `${qty}x ${user.selectedItem}`, price: cost, status: 'PENDING' });
-            await user.save();
-            return sendText(psid, user, `✅ OK! ID: ${oid}`);
-        } else {
-            await Order.create({ psid, orderId: oid, provider: `${qty}x ${user.selectedItem} (Manual)`, price: cost, status: 'WAITING PAYMENT' });
-            return sendButtons(psid, user, "Low balance. Pay via support.", [{ "title": "👨‍💻 Support", "url": SUPPORT_LINK }]);
-        }
+        await Order.create({ psid, orderId: oid, provider: `${qty}x ${user.selectedItem}`, price: cost, status: 'WAITING PAYMENT' });
+        return sendButtons(psid, user, `Order ${oid} Pending.\nTotal: $${cost.toFixed(2)}\nPay via support.`, [{ "title": "👨‍💻 Support", "url": SUPPORT_LINK }]);
     }
 }
 
@@ -202,8 +182,7 @@ function sendAuth(psid, user) {
     const l = user.language === 'NONE' ? 'en' : user.language;
     sendButtons(psid, user, i18n.auth_msg[l], [
         { "title": i18n.login[l], "payload": "GOTO_LOGIN" },
-        { "title": i18n.signup[l], "payload": "GOTO_SIGNUP" },
-        { "title": i18n.free[l], "payload": "FREE_PROXY" }
+        { "title": i18n.signup[l], "payload": "GOTO_SIGNUP" }
     ]);
 }
 
@@ -216,7 +195,7 @@ function sendMenu(psid, user) {
 }
 
 function sendText(psid, user, text) {
-    callAPI(psid, { text, quick_replies: [{ content_type: "text", title: i18n.back[user.language] || "Back", payload: "MAIN" }] });
+    callAPI(psid, { text });
 }
 
 function sendButtons(psid, user, text, b) {
@@ -225,10 +204,9 @@ function sendButtons(psid, user, text, b) {
 }
 
 function callAPI(psid, message) {
-    axios.post(`https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, { recipient: { id: psid }, message }).catch(()=>{});
+    axios.post(`https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, { recipient: { id: psid }, message }).catch(e => {});
 }
 
-// --- WEBHOOK ROUTES ---
 app.get('/webhook', (req, res) => {
     if (req.query['hub.verify_token'] === 'tata') res.status(200).send(req.query['hub.challenge']);
 });
@@ -238,8 +216,7 @@ app.post('/webhook', async (req, res) => {
     if (entry && entry.messaging) {
         let event = entry.messaging[0];
         let psid = event.sender.id;
-        let user = await User.findOne({ psid });
-        if (!user) user = await User.create({ psid, language: 'NONE' });
+        let user = await User.findOne({ psid }) || await User.create({ psid, language: 'NONE' });
         if (event.message && event.message.text) handleMessage(psid, event.message.text, user);
         else if (event.postback) handlePostback(psid, event.postback.payload, user);
     }
