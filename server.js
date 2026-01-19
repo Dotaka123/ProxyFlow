@@ -24,7 +24,7 @@ const User = mongoose.model('User', new mongoose.Schema({
     psid: { type: String, unique: true }, email: String, password: String,
     balance: { type: Number, default: 0 }, isLoggedIn: { type: Boolean, default: false },
     step: { type: String, default: 'IDLE' }, selectedItem: String, selectedPrice: Number,
-    captchaCode: String // Stocke le captcha temporaire
+    captchaCode: String
 }));
 
 const Order = mongoose.model('Order', new mongoose.Schema({
@@ -36,39 +36,40 @@ const Settings = mongoose.model('Settings', new mongoose.Schema({ key: String, v
 
 // --- MESSAGE LOGIC ---
 async function handleMessage(psid, text, user) {
-    if (text === "Return to main menu") { user.step = 'IDLE'; await user.save(); return sendMenu(psid, user); }
+    // Commande universelle pour revenir au menu
+    if (text.toLowerCase() === "menu" || text === "Return to main menu") {
+        user.step = 'IDLE'; await user.save();
+        return user.isLoggedIn ? sendMenu(psid, user) : sendAuth(psid);
+    }
 
-    // --- SIGNUP FLOW WITH CAPTCHA ---
+    // --- FLUX INSCRIPTION AVEC CAPTCHA ---
     if (user.step === 'SIGNUP_EMAIL') {
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         if (!emailRegex.test(text.trim())) return sendText(psid, "❌ Invalid email. Please enter a real email:");
         
-        // Génération du Captcha
-        const captcha = Math.random().toString(36).substring(2, 8).toUpperCase(); // Exemple: A1B2C3
+        const captcha = Math.random().toString(36).substring(2, 7).toUpperCase();
         user.email = text.trim().toLowerCase();
         user.captchaCode = captcha;
-        user.step = 'VERIFY_CAPTCHA'; 
-        await user.save();
-
-        return sendText(psid, `🤖 SECURITY CHECK\n\nPlease type the following code to prove you are human:\n\n👉 **${captcha}**`);
+        user.step = 'VERIFY_CAPTCHA'; await user.save();
+        return sendText(psid, `🤖 CAPTCHA\n\nTo continue, please type this code:\n\n👉 ${captcha}`);
     }
 
     if (user.step === 'VERIFY_CAPTCHA') {
         if (text.trim().toUpperCase() === user.captchaCode) {
             user.step = 'SIGNUP_PASS'; await user.save();
-            return sendText(psid, "✅ Captcha correct! Now choose a password (min. 6 characters):");
+            return sendText(psid, "✅ Correct! Now choose a password (min. 6 characters):");
         } else {
-            const newCaptcha = Math.random().toString(36).substring(2, 8).toUpperCase();
-            user.captchaCode = newCaptcha; await user.save();
-            return sendText(psid, `❌ Wrong code. Try again with this one:\n\n👉 **${newCaptcha}**`);
+            const newC = Math.random().toString(36).substring(2, 7).toUpperCase();
+            user.captchaCode = newC; await user.save();
+            return sendText(psid, `❌ Wrong code. Try this one:\n\n👉 ${newC}`);
         }
     }
 
     if (user.step === 'SIGNUP_PASS') {
-        if (text.length < 6) return sendText(psid, "⚠️ Password too short! Min 6 characters:");
+        if (text.length < 6) return sendText(psid, "⚠️ Too short! Min 6 characters:");
         user.password = text.trim();
         user.isLoggedIn = true; user.step = 'IDLE'; await user.save();
-        return sendText(psid, "✅ Registration successful! Welcome to ProxyFlow.");
+        return sendText(psid, "✅ Account created! Welcome to ProxyFlow.");
     }
 
     // --- LOGIN ---
@@ -85,7 +86,7 @@ async function handleMessage(psid, text, user) {
         } else return sendText(psid, "❌ Wrong password.");
     }
 
-    // --- SHOP ---
+    // --- COMMANDE QUANTITÉ ---
     if (user.step === 'ASK_QUANTITY') {
         const qty = parseInt(text);
         if (isNaN(qty) || qty <= 0) return sendText(psid, "❌ Enter a valid number.");
@@ -101,41 +102,45 @@ async function handleMessage(psid, text, user) {
     sendMenu(psid, user);
 }
 
-// --- POSTBACK HANDLING ---
+// --- POSTBACK LOGIC ---
 async function handlePostback(psid, payload, user) {
+    if (payload === 'MAIN' || payload === 'GET_STARTED') {
+        user.step = 'IDLE'; await user.save();
+        return user.isLoggedIn ? sendMenu(psid, user) : sendAuth(psid);
+    }
+
     if (payload === 'GOTO_SIGNUP') { user.step = 'SIGNUP_EMAIL'; await user.save(); return sendText(psid, "📧 Enter Email:"); }
     if (payload === 'GOTO_LOGIN') { user.step = 'LOGIN_EMAIL'; await user.save(); return sendText(psid, "📧 Enter Email:"); }
     
-    if (!user.isLoggedIn) {
-        if (payload === 'FREE_PROXY') {
-            const data = await Settings.findOne({ key: 'free_proxies' });
-            return sendText(psid, "🎁 FREE PROXIES:\n\n" + (data ? data.value : "None available."));
-        }
-        return sendAuth(psid);
+    if (payload === 'FREE_PROXY') {
+        const data = await Settings.findOne({ key: 'free_proxies' });
+        return sendText(psid, "🎁 FREE PROXIES:\n\n" + (data ? data.value : "None available."));
     }
 
+    if (!user.isLoggedIn) return sendAuth(psid);
+
+    // --- ACCOUNT & ORDERS ---
     if (payload === 'MY_ACCOUNT') {
-        return sendButtons(psid, `👤 ${user.email}\n💰 Balance: ${user.balance.toFixed(2)}$`, [
+        return sendButtons(psid, `👤 ${user.email}\n💰 Balance: $${user.balance.toFixed(2)}`, [
             { "title": "➕ Add Funds", "payload": "ADD_FUNDS" },
             { "title": "📜 Mes Proxies", "payload": "MY_ORDERS" },
             { "title": "🚪 Sign Out", "payload": "GOTO_SIGNOUT" }
         ]);
     }
 
-    if (payload === 'ADD_FUNDS') {
-        return sendButtons(psid, "💳 Minimum deposit: $5.00\nSend via Binance ID or LTC.\nContact support with proof.", [{ "title": "👨‍💻 Support", "url": SUPPORT_LINK }]);
-    }
-
     if (payload === 'MY_ORDERS') {
         const orders = await Order.find({ psid }).sort({ date: -1 }).limit(5);
-        if (orders.length === 0) return sendText(psid, "📦 No proxies found in your account.");
-        let msg = "📬 Your Latest Proxies:\n\n";
-        orders.forEach(o => {
-            msg += `🆔 ID: ${o.orderId}\nStatus: ${o.status}\nProxy: ${o.proxyData || 'Pending...'}\n---\n`;
-        });
+        if (orders.length === 0) return sendText(psid, "📦 No proxies found.");
+        let msg = "📬 Mes Proxies (Latest 5):\n\n";
+        orders.forEach(o => msg += `🆔 ${o.orderId} | ${o.status}\n📦 ${o.provider}\n🔑 ${o.proxyData || 'Pending...'}\n---\n`);
         return sendText(psid, msg);
     }
 
+    if (payload === 'ADD_FUNDS') {
+        return sendButtons(psid, "💳 Minimum deposit: $5.00\n\n1. Send to Binance ID or LTC.\n2. Screenshot proof.\n3. Send to support.", [{ "title": "👨‍💻 Support", "url": SUPPORT_LINK }]);
+    }
+
+    // --- SHOP ---
     if (payload === 'START_ORDER') {
         return sendButtons(psid, "🌍 Select Category:", [
             { "title": "⚡ Paid Proxies", "payload": "MENU_PAID" },
@@ -144,7 +149,7 @@ async function handlePostback(psid, payload, user) {
     }
 
     if (payload === 'MENU_PAID') {
-        return sendButtons(psid, "Select Residential Type:", [
+        return sendButtons(psid, "Residential Types (0 Fraud):", [
             { "title": "Static ISP ($6)", "payload": "BUY_STATIC_6" },
             { "title": "Virgin Resi ($6)", "payload": "BUY_VIRGIN_6" },
             { "title": "Verizon ($4.5)", "payload": "BUY_VERIZON_4.5" }
@@ -166,9 +171,9 @@ async function handlePostback(psid, payload, user) {
             user.balance -= cost;
             await Order.create({ psid, orderId: oid, provider: `${qty}x ${user.selectedItem}`, price: cost, status: 'PENDING' });
             await user.save();
-            return sendText(psid, `✅ Order ${oid} placed! Delivery soon in "Mes Proxies".`);
+            return sendText(psid, `✅ Order ${oid} placed! Check "Mes Proxies" soon.`);
         } else {
-            return sendButtons(psid, `⚠️ Insufficient Balance ($${cost.toFixed(2)} needed).\nPlease add at least $5.00.`, [{"title":"➕ Add Funds", "payload": "ADD_FUNDS"}]);
+            return sendButtons(psid, `⚠️ Balance too low ($${cost.toFixed(2)} required).`, [{"title":"➕ Add Funds", "payload": "ADD_FUNDS"}]);
         }
     }
 
@@ -185,7 +190,7 @@ function sendAuth(psid) {
 }
 
 function sendMenu(psid, user) {
-    sendButtons(psid, `ProxyFlow Menu\nBalance: ${user.balance.toFixed(2)}$`, [
+    sendButtons(psid, `ProxyFlow Menu\nBalance: $${user.balance.toFixed(2)}`, [
         { "title": "🛒 Shop", "payload": "START_ORDER" },
         { "title": "👤 Account", "payload": "MY_ACCOUNT" }
     ]);
