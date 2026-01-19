@@ -97,15 +97,19 @@ async function handleMessage(psid, text, user) {
 
 // --- LOGIQUE BOUTONS ---
 async function handlePostback(psid, payload, user) {
-    // Gère le bouton "Démarrer" (GET_STARTED)
     if (payload === 'GET_STARTED' || payload === 'MAIN') {
         user.step = 'IDLE'; await user.save();
         return user.isLoggedIn ? sendMenu(psid, user) : sendAuth(psid);
     }
-
+    if (payload === 'FREE_PROXY') {
+        const data = await Settings.findOne({ key: 'free_proxies' });
+        return sendText(psid, "🎁 FREE PROXIES:\n\n" + (data ? data.value : "None available."));
+    }
     if (payload === 'GOTO_SIGNUP') { user.step = 'SIGNUP_EMAIL'; await user.save(); return sendText(psid, "📧 Enter Email:"); }
     if (payload === 'GOTO_LOGIN') { user.step = 'LOGIN_EMAIL'; await user.save(); return sendText(psid, "📧 Enter Email:"); }
-    
+
+    if (!user.isLoggedIn) return sendAuth(psid);
+
     if (payload === 'MY_ACCOUNT') {
         return sendButtons(psid, `👤 ${user.email}\n💰 Balance: $${user.balance.toFixed(2)}`, [
             { "title": "➕ Add Funds", "payload": "ADD_FUNDS" },
@@ -123,7 +127,7 @@ async function handlePostback(psid, payload, user) {
     }
 
     if (payload === 'ADD_FUNDS') {
-        return sendButtons(psid, "💳 DEPOSIT\nMin: $5.00\n\nSend to Binance ID or LTC and contact support.", [{ "title": "👨‍💻 Support", "url": SUPPORT_LINK }]);
+        return sendButtons(psid, "💳 HOW TO PAY\n\nMin deposit: $5.00\nMethods: Binance ID or LTC.\n\nSend payment and contact support with proof to update your balance.", [{ "title": "👨‍💻 Support", "url": SUPPORT_LINK }]);
     }
 
     if (payload === 'START_ORDER') {
@@ -151,14 +155,21 @@ async function handlePostback(psid, payload, user) {
     if (payload.startsWith('CONFIRM_PAY_')) {
         const [,, qty, total] = payload.split('_');
         const cost = parseFloat(total);
+        const oid = "PF" + Math.floor(Math.random()*99999);
+
         if (user.balance >= cost) {
             user.balance -= cost;
-            const oid = "PF" + Math.floor(Math.random()*99999);
             await Order.create({ psid, orderId: oid, provider: `${qty}x ${user.selectedItem}`, price: cost, status: 'PENDING' });
             await user.save();
-            return sendText(psid, `✅ Order ${oid} placed!`);
+            return sendText(psid, `✅ Order ${oid} placed using your balance!`);
         } else {
-            return sendButtons(psid, `⚠️ Need $${cost.toFixed(2)}`, [{"title":"➕ Add Funds", "payload": "ADD_FUNDS"}]);
+            // --- NOUVELLE LOGIQUE : PAS DE BLOCAGE ---
+            // On crée quand même la commande en statut "Manual Payment"
+            await Order.create({ psid, orderId: oid, provider: `${qty}x ${user.selectedItem} (Manual)`, price: cost, status: 'WAITING PAYMENT' });
+            return sendButtons(psid, `💳 ORDER PENDING\n\nTotal: $${cost.toFixed(2)}\n\nYou don't have enough balance, but you can pay directly to support via Binance or LTC to get your proxies!`, [
+                { "title": "👨‍💻 Pay via Support", "url": SUPPORT_LINK },
+                { "title": "🛒 Back to Shop", "payload": "START_ORDER" }
+            ]);
         }
     }
 
