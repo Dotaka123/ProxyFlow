@@ -96,7 +96,7 @@ async function handlePostback(psid, payload, user) {
     if (payload === 'FREE_PROXY') {
         const data = await Settings.findOne({ key: 'free_proxies' });
         const freeText = data ? data.value : "🚫 No free proxies available right now.";
-        return sendText(psid, "🎁 FREE RESIDENTIAL PROXIES (0 Fraud Score):\n\n" + freeText);
+        return sendText(psid, "🎁 FREE RESIDENTIAL PROXIES (Might be slow):\n\n" + freeText);
     }
 
     if (!user.isLoggedIn) return sendAuth(psid);
