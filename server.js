@@ -5,12 +5,12 @@ const mongoose = require('mongoose');
 
 const app = express().use(bodyParser.json());
 
-// --- FIX: PAGE D'ACCUEIL (ÉVITE LE CANNOT GET /) ---
+// --- PAGE D'ACCUEIL (FIX CANNOT GET /) ---
 app.get('/', (req, res) => {
     res.send(`
         <body style="background:#121212;color:white;text-align:center;padding-top:100px;font-family:sans-serif;">
             <h1 style="color:#2ecc71;">● ProxyFlow Bot is Online</h1>
-            <p>Le Webhook Messenger est prêt.</p>
+            <p>Le Webhook Messenger est actif.</p>
             <a href="https://www.facebook.com/profile.php?id=61586969783401" style="color:#3498db;text-decoration:none;">Support Technique</a>
         </body>
     `);
@@ -38,29 +38,51 @@ const Order = mongoose.model('Order', new mongoose.Schema({
 async function handleMessage(psid, text, user) {
     if (text === "Return to main menu") return sendMenu(psid, user);
 
-    if (user.step === 'SIGNUP_EMAIL') { user.email = text; user.step = 'SIGNUP_PASS'; await user.save(); return sendText(psid, "🔐 Choose a password:"); }
-    if (user.step === 'SIGNUP_PASS') { user.password = text; user.isLoggedIn = true; user.step = 'IDLE'; await user.save(); return sendText(psid, "✅ Account created! Welcome."); }
-    
+    // --- SIGNUP AVEC VALIDATION ---
+    if (user.step === 'SIGNUP_EMAIL') {
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(text.trim())) {
+            return sendText(psid, "❌ Invalid email format. Please enter a real email:");
+        }
+        user.email = text.trim().toLowerCase();
+        user.step = 'SIGNUP_PASS'; await user.save();
+        return sendText(psid, "🔐 Choose a password (min. 6 characters):");
+    }
+    if (user.step === 'SIGNUP_PASS') {
+        if (text.length < 6) return sendText(psid, "⚠️ Password too short! Min 6 characters:");
+        user.password = text.trim();
+        user.isLoggedIn = true; user.step = 'IDLE'; await user.save();
+        return sendText(psid, "✅ Registration successful! Welcome to ProxyFlow.");
+    }
+
+    // --- LOGIN ---
     if (user.step === 'LOGIN_EMAIL') {
-        const check = await User.findOne({ email: text });
-        if (!check) return sendText(psid, "❌ Email not found.");
-        user.email = text; user.step = 'LOGIN_PASS'; await user.save();
+        const check = await User.findOne({ email: text.trim().toLowerCase() });
+        if (!check) return sendText(psid, "❌ Email not found. Try again or Signup.");
+        user.email = text.trim().toLowerCase();
+        user.step = 'LOGIN_PASS'; await user.save();
         return sendText(psid, "🔐 Enter your password:");
     }
     if (user.step === 'LOGIN_PASS') {
         const real = await User.findOne({ email: user.email });
-        if (real && real.password === text) { user.isLoggedIn = true; user.step = 'IDLE'; await user.save(); return sendMenu(psid, user); }
-        else return sendText(psid, "❌ Wrong password.");
+        if (real && real.password === text.trim()) {
+            user.isLoggedIn = true; user.step = 'IDLE'; await user.save();
+            return sendMenu(psid, user);
+        } else {
+            return sendText(psid, "❌ Wrong password. Try again:");
+        }
     }
 
+    // --- QUANTITÉ ---
     if (user.step === 'ASK_QUANTITY') {
         const qty = parseInt(text);
-        if (isNaN(qty) || qty <= 0) return sendText(psid, "❌ Enter a valid number.");
-        if (user.selectedItem === 'VIRGIN' && qty < 10) return sendText(psid, "⚠️ Min: 10 pieces for Virgin.");
+        if (isNaN(qty) || qty <= 0) return sendText(psid, "❌ Please enter a valid number.");
+        if (user.selectedItem === 'VIRGIN' && qty < 10) return sendText(psid, "⚠️ Minimum 10 pieces for Virgin Residential.");
+
         const total = qty * user.selectedPrice;
         user.step = 'IDLE'; await user.save();
         return sendButtons(psid, `🛒 Order: ${qty}x ${user.selectedItem}\n💰 Total: $${total.toFixed(2)}`, [
-            { "title": "Confirm payment", "payload": `CONFIRM_PAY_${qty}_${total}` },
+            { "title": "Confirm & Pay", "payload": `CONFIRM_PAY_${qty}_${total}` },
             { "title": "❌ Cancel", "payload": "START_ORDER" }
         ]);
     }
@@ -71,8 +93,8 @@ async function handleMessage(psid, text, user) {
 
 // --- LOGIQUE BOUTONS ---
 async function handlePostback(psid, payload, user) {
-    if (payload === 'GOTO_SIGNUP') { user.step = 'SIGNUP_EMAIL'; await user.save(); return sendText(psid, "📧 Enter Email:"); }
-    if (payload === 'GOTO_LOGIN') { user.step = 'LOGIN_EMAIL'; await user.save(); return sendText(psid, "📧 Enter Email:"); }
+    if (payload === 'GOTO_SIGNUP') { user.step = 'SIGNUP_EMAIL'; await user.save(); return sendText(psid, "📧 Enter your Email:"); }
+    if (payload === 'GOTO_LOGIN') { user.step = 'LOGIN_EMAIL'; await user.save(); return sendText(psid, "📧 Enter your Email:"); }
     
     if (!user.isLoggedIn) return sendAuth(psid);
 
@@ -90,7 +112,6 @@ async function handlePostback(psid, payload, user) {
         ]);
     }
 
-    // SOUS-MENUS AVEC BOUTON INFO SUR TOUS
     if (payload.startsWith('MENU_')) {
         const type = payload.split('_')[1];
         const price = (type === 'VERIZON') ? '4.5' : '6.0';
@@ -103,9 +124,9 @@ async function handlePostback(psid, payload, user) {
 
     if (payload.startsWith('INFO_')) {
         const info = { 
-            'STATIC': "⚡ STATIC ISP ($6.00):\n- USA/UK/AUS locations.\n- High speed & Renewable.", 
-            'VIRGIN': "🏠 VIRGIN ($6.00):\n- AT&T (HTTP) or Windstream (SOCKS5).\n- Cleanest IPs. Min: 10.", 
-            'VERIZON': "📍 VERIZON ($4.50):\n- Static Residential.\n- VA, WA, NY, IL.\n- Non-renewable." 
+            'STATIC': "⚡ STATIC ISP ($6.00):\n- USA/UK/AUS.\n- High speed & Renewable.", 
+            'VIRGIN': "🏠 VIRGIN ($6.00):\n- AT&T or Windstream.\n- Cleanest IPs. Min: 10.", 
+            'VERIZON': "📍 VERIZON ($4.50):\n- Static Residential.\n- Fast & Stable." 
         };
         return sendText(psid, info[payload.split('_')[1]]);
     }
@@ -118,8 +139,8 @@ async function handlePostback(psid, payload, user) {
     }
 
     if (payload === 'MY_ACCOUNT') {
-        let lowBalanceMsg = (user.balance < 4.5) ? "\n⚠️ Low balance! Please recharge." : "";
-        return sendButtons(psid, `👤 Account: ${user.email}\n💰 Balance: ${user.balance.toFixed(2)}$${lowBalanceMsg}`, [
+        let low = (user.balance < 4.5) ? "\n⚠️ Low balance!" : "";
+        return sendButtons(psid, `👤 Account: ${user.email}\n💰 Balance: ${user.balance.toFixed(2)}$${low}`, [
             { "title": "➕ Add Funds", "payload": "ADD_FUNDS" },
             { "title": "📜 History", "payload": "MY_ORDERS" },
             { "title": "🚪 Sign Out", "payload": "GOTO_SIGNOUT" }
@@ -127,13 +148,13 @@ async function handlePostback(psid, payload, user) {
     }
 
     if (payload === 'ADD_FUNDS') {
-        return sendButtons(psid, "💳 Minimum deposit: $10\nSend to Binance ID or LTC.\nContact support with proof.", [{ "title": "👨‍💻 Support", "url": SUPPORT_LINK }]);
+        return sendButtons(psid, "💳 Min deposit: $10\nSend to Binance ID or LTC.\nContact support with proof.", [{ "title": "👨‍💻 Support", "url": SUPPORT_LINK }]);
     }
 
     if (payload === 'MY_ORDERS') {
         const orders = await Order.find({ psid }).sort({ date: -1 }).limit(5);
-        if (orders.length === 0) return sendText(psid, "📜 No orders.");
-        let m = "📜 History:\n";
+        if (orders.length === 0) return sendText(psid, "📜 No history.");
+        let m = "📜 Last Orders:\n";
         orders.forEach(o => m += `\n${o.status === 'LIVRÉ' ? '✅':'⏳'} ${o.provider} - ${o.status}`);
         return sendText(psid, m);
     }
@@ -146,14 +167,14 @@ async function handlePostback(psid, payload, user) {
             const oid = "PF" + Math.floor(Math.random()*99999);
             await Order.create({ psid, orderId: oid, provider: `${qty}x ${user.selectedItem}`, price: cost });
             await user.save();
-            return sendText(psid, `✅ Order ${oid} placed!`);
+            return sendText(psid, `✅ Order ${oid} placed! Admin will deliver soon.`);
         } else {
-            return sendText(psid, `❌ Insufficient balance. You need $${cost.toFixed(2)}.`);
+            return sendText(psid, `❌ Insufficient balance ($${user.balance.toFixed(2)}). Need $${cost.toFixed(2)}.`);
         }
     }
 }
 
-// --- HELPERS (Quick Replies) ---
+// --- HELPERS ---
 function sendAuth(psid) {
     sendButtons(psid, "Welcome to ProxyFlow! 🌐\nPlease login or signup:", [
         { "title": "🔑 Login", "payload": "GOTO_LOGIN" },
@@ -163,8 +184,8 @@ function sendAuth(psid) {
 
 function sendMenu(psid, user) {
     if (!user.isLoggedIn) return sendAuth(psid);
-    let lowBalanceMsg = (user.balance < 4.5) ? "\n⚠️ Balance Low!" : "";
-    sendButtons(psid, `ProxyFlow Menu${lowBalanceMsg}\nBalance: ${user.balance.toFixed(2)}$`, [
+    let alert = (user.balance < 4.5) ? " (⚠️ Low Balance)" : "";
+    sendButtons(psid, `ProxyFlow Menu${alert}\nBalance: ${user.balance.toFixed(2)}$`, [
         { "title": "🛒 Shop", "payload": "START_ORDER" },
         { "title": "👤 My Account", "payload": "MY_ACCOUNT" }
     ]);
