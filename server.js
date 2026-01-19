@@ -139,7 +139,7 @@ async function handlePostback(psid, payload, user) {
 
     // --- INFOS PROXIES AJOUTÉES ICI ---
     if (payload === 'MENU_PAID') {
-        return sendButtons(psid, "🚀 RESIDENTIAL (0 FRAUD SCORE)\n\n• Static ISP: High speed, 1-month duration.\n• Virgin Resi: Never used, perfect for social media.\n• Verizon: Top tier US mobile provider.", [
+        return sendButtons(psid, "🚀 RESIDENTIAL (0 FRAUD SCORE *verizon not always)\n\n• Static ISP: High speed, renewable.\n• Virgin Resi: Never used before, perfect for survey.\n• Verizon: Top tier US mobile provider.", [
             { "title": "Static ISP ($6)", "payload": "BUY_STATIC_6" },
             { "title": "Virgin Resi ($6)", "payload": "BUY_VIRGIN_6" },
             { "title": "Verizon ($4.5)", "payload": "BUY_VERIZON_4.5" }
