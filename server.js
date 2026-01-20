@@ -4,13 +4,17 @@ const axios = require('axios');
 const mongoose = require('mongoose');
 
 const app = express().use(bodyParser.json());
+
+// 1. FIX "Cannot GET /" : Redirige vers ton panel admin ou affiche le statut
+app.get('/', (req, res) => res.send("🚀 ProxyFlow Bot API is Live. Go to /admin/panel for Dashboard."));
+
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const MONGO_URI = process.env.MONGO_URI;
 const SUPPORT_LINK = "https://www.facebook.com/profile.php?id=61579023569844";
 
 mongoose.connect(MONGO_URI);
 
-// --- MODÈLES ---
+// --- MODÈLES (ALIGNÉS SUR TON ADMIN PANEL) ---
 const User = mongoose.model('User', new mongoose.Schema({
     psid: String, email: String, password: { type: String, default: "" },
     balance: { type: Number, default: 0 }, language: { type: String, default: 'fr' },
@@ -23,46 +27,38 @@ const Order = mongoose.model('Order', new mongoose.Schema({
     status: { type: String, default: 'PENDING' }, proxyData: String, date: { type: Date, default: Date.now }
 }));
 
-const ProxyStock = mongoose.model('ProxyStock', new mongoose.Schema({
-    type: String, data: String, isUsed: { type: Boolean, default: false }, ownerPsid: String
+const Settings = mongoose.model('Settings', new mongoose.Schema({
+    key: String, value: String
 }));
 
-// --- TRADUCTIONS ---
-const i18n = {
-    menu: { fr: "🏠 Menu Principal", en: "🏠 Main Menu", mg: "🏠 Menu Be" },
-    shop: { fr: "🛒 Boutique", en: "🛒 Shop", mg: "🛒 Tsena" },
-    acc: { fr: "👤 Mon Compte", en: "👤 Account", mg: "👤 Kaonty" }
-};
-
-// --- LOGIQUE PRINCIPALE ---
+// --- LOGIQUE MESSAGES & QUICK REPLIES ---
 async function handleMessage(psid, event, user) {
     const text = event.text;
     const payload = event.quick_reply ? event.quick_reply.payload : null;
-    const lang = user.language || 'fr';
 
-    // 1. GESTION DES CLICS (PAYLOADS)
     if (payload) {
         if (payload === 'MAIN_MENU') return sendMenu(psid, user);
-        
+
+        // --- SECTION BOUTIQUE ---
         if (payload === 'START_ORDER') {
-            return sendQuickReplies(psid, "Catégories :", [
+            return sendQuickReplies(psid, "🛒 Boutique ProxyFlow :", [
                 { title: "Static ISP ($6)", payload: "CAT_ISP" },
                 { title: "Virgin Resi ($6)", payload: "CAT_VIRGIN" },
                 { title: "Verizon ($4.5)", payload: "CAT_VERIZON" },
-                { title: "🎁 Free Proxy", payload: "GET_FREE" },
-                { title: i18n.menu[lang], payload: "MAIN_MENU" }
+                { title: "🎁 Proxy Gratuit", payload: "GET_FREE" },
+                { title: "🏠 Menu", payload: "MAIN_MENU" }
             ]);
         }
 
+        // --- FIX PROXY GRATUIT (SYNCHRO ADMIN) ---
         if (payload === 'GET_FREE') {
-            const free = await ProxyStock.findOne({ type: 'Free', isUsed: false });
-            if (!free) return sendQuickReplies(psid, "❌ Plus de stock gratuit.", [{ title: i18n.menu[lang], payload: "MAIN_MENU" }]);
-            free.isUsed = true; free.ownerPsid = psid; await free.save();
-            return sendQuickReplies(psid, `🎁 Votre Proxy Gratuit :\n\n${free.data}`, [{ title: i18n.menu[lang], payload: "MAIN_MENU" }]);
+            const freeSetting = await Settings.findOne({ key: 'free_proxies' });
+            const msg = freeSetting ? `🎁 Proxies Gratuits :\n\n${freeSetting.value}` : "❌ Aucun proxy gratuit disponible.";
+            return sendQuickReplies(psid, msg, [{ title: "🏠 Menu", payload: "MAIN_MENU" }]);
         }
 
         if (payload === 'CAT_ISP') {
-            return sendQuickReplies(psid, "Static ISP :", [
+            return sendQuickReplies(psid, "Static ISP (0 Fraud) :", [
                 { title: "USA ($6)", payload: "BUY_ISP-USA_6" },
                 { title: "UK ($6)", payload: "BUY_ISP-UK_6" },
                 { title: "AU ($6)", payload: "BUY_ISP-AU_6" },
@@ -71,7 +67,7 @@ async function handleMessage(psid, event, user) {
         }
 
         if (payload === 'CAT_VIRGIN') {
-            return sendQuickReplies(psid, "Virgin (Min 10 IPs) :", [
+            return sendQuickReplies(psid, "Virgin (Min 10) :", [
                 { title: "AT&T (HTTP)", payload: "BUY_VIRGIN-ATT_6" },
                 { title: "Windstream (S5)", payload: "BUY_VIRGIN-WIND_6" },
                 { title: "⬅️ Retour", payload: "START_ORDER" }
@@ -90,59 +86,51 @@ async function handleMessage(psid, event, user) {
             user.selectedItem = parts[1];
             user.selectedPrice = parseFloat(parts[2]);
             user.step = 'ASK_QTY'; await user.save();
-            return sendText(psid, `📍 Produit : ${user.selectedItem}\nCombien d'unités voulez-vous ? (Tapez un chiffre)`);
+            return sendText(psid, `📍 Choix : ${user.selectedItem}\nCombien d'unités ?`);
         }
 
+        // --- COMPTE ---
         if (payload === 'MY_ACCOUNT') {
-            return sendQuickReplies(psid, `👤 ${user.email}\n💰 Solde: $${user.balance}`, [
+            return sendQuickReplies(psid, `👤 ${user.email}\n💰 Solde : $${user.balance.toFixed(2)}`, [
                 { title: "🔑 Mes Proxies", payload: "VIEW_PROXIES" },
-                { title: "🌐 Langue", payload: "CHOOSE_LANG" },
-                { title: "🔴 Déconnexion", payload: "LOGOUT" },
-                { title: i18n.menu[lang], payload: "MAIN_MENU" }
+                { title: "🏠 Menu", payload: "MAIN_MENU" }
             ]);
-        }
-
-        if (payload === 'CHOOSE_LANG') {
-            return sendQuickReplies(psid, "Choisir langue :", [
-                { title: "Français 🇫🇷", payload: "SET_LANG_fr" },
-                { title: "English 🇬🇧", payload: "SET_LANG_en" },
-                { title: "Malagasy 🇲🇬", payload: "SET_LANG_mg" }
-            ]);
-        }
-
-        if (payload.startsWith('SET_LANG_')) {
-            user.language = payload.split('_')[2];
-            await user.save();
-            return sendMenu(psid, user);
         }
 
         if (payload === 'VIEW_PROXIES') {
             const delivered = await Order.find({ psid, status: 'DELIVERED' });
-            if (delivered.length === 0) return sendQuickReplies(psid, "📭 Aucun proxy actif.", [{ title: i18n.menu[lang], payload: "MAIN_MENU" }]);
+            if (delivered.length === 0) return sendQuickReplies(psid, "📭 Pas de proxies actifs.", [{ title: "🏠 Menu", payload: "MAIN_MENU" }]);
             let msg = "🔑 VOS ACCÈS :\n";
             delivered.forEach(o => msg += `\n📦 ${o.provider}:\n${o.proxyData}\n`);
-            return sendQuickReplies(psid, msg, [{ title: i18n.menu[lang], payload: "MAIN_MENU" }]);
+            return sendQuickReplies(psid, msg, [{ title: "🏠 Menu", payload: "MAIN_MENU" }]);
         }
 
-        if (payload === 'GOTO_SIGNUP') { user.step = 'SIGNUP_EMAIL'; await user.save(); return sendText(psid, "📧 Email :"); }
-        if (payload === 'LOGOUT') { user.isLoggedIn = false; await user.save(); return sendAuth(psid); }
+        if (payload === 'GOTO_SIGNUP') { user.step = 'SIGNUP_EMAIL'; await user.save(); return sendText(psid, "📧 Votre email :"); }
     }
 
-    // 2. GESTION DU TEXTE
+    // --- LOGIQUE TEXTE (QUANTITÉ / INSCRIPTION) ---
     if (user.step === 'ASK_QTY') {
         const qty = parseInt(text);
-        if (isNaN(qty) || qty <= 0) return sendText(psid, "❌ Nombre invalide.");
+        if (isNaN(qty) || qty <= 0) return sendText(psid, "❌ Entrez un nombre.");
         if (user.selectedItem.includes('VIRGIN') && qty < 10) return sendText(psid, "⚠️ Min 10 IPs pour Virgin.");
 
         const total = qty * user.selectedPrice;
         const orderId = "ORD-" + Math.random().toString(36).substr(2, 6).toUpperCase();
-        await Order.create({ psid, orderId, provider: `${qty}x ${user.selectedItem}`, price: total, status: 'PENDING' });
-        
+
+        // Création commande alignée sur les filtres de ton admin (provider, price, orderId)
+        await Order.create({ 
+            psid, 
+            orderId, 
+            provider: `${qty}x ${user.selectedItem}`, 
+            price: total, 
+            status: 'PENDING' 
+        });
+
         user.step = 'IDLE'; await user.save();
-        return sendQuickReplies(psid, `✅ Commande ${orderId} créée !\nTotal : $${total.toFixed(2)}\n\nContactez le support pour payer : ${SUPPORT_LINK}`, [{ title: i18n.menu[lang], payload: "MAIN_MENU" }]);
+        return sendQuickReplies(psid, `✅ Commande ${orderId} créée !\nTotal : $${total.toFixed(2)}\n\nPayer ici : ${SUPPORT_LINK}`, [{ title: "🏠 Menu", payload: "MAIN_MENU" }]);
     }
 
-    // Inscription Flow
+    // Auth Flow
     if (user.step === 'SIGNUP_EMAIL') {
         user.email = text.trim().toLowerCase();
         user.captchaCode = Math.floor(1000 + Math.random() * 9000).toString();
@@ -172,14 +160,13 @@ function sendQuickReplies(psid, text, options) {
 }
 
 function sendAuth(psid) {
-    sendQuickReplies(psid, "Bienvenue sur ProxyFlow 🌐", [{ title: "Inscription", payload: "GOTO_SIGNUP" }]);
+    sendQuickReplies(psid, "ProxyFlow 🌐", [{ title: "Inscription", payload: "GOTO_SIGNUP" }]);
 }
 
 function sendMenu(psid, user) {
-    const l = user.language || 'fr';
-    sendQuickReplies(psid, `ProxyFlow | Solde: $${user.balance}`, [
-        { title: i18n.shop[l], payload: "START_ORDER" },
-        { title: i18n.acc[l], payload: "MY_ACCOUNT" }
+    sendQuickReplies(psid, `Menu | Solde: $${user.balance.toFixed(2)}`, [
+        { title: "🛒 Boutique", payload: "START_ORDER" },
+        { title: "👤 Mon Compte", payload: "MY_ACCOUNT" }
     ]);
 }
 
@@ -189,6 +176,7 @@ function callAPI(psid, message) {
     axios.post(`https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, { recipient: { id: psid }, message }).catch(e => {});
 }
 
+// Webhook
 app.post('/webhook', async (req, res) => {
     const entry = req.body.entry[0];
     if (entry && entry.messaging) {
