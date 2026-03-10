@@ -2,6 +2,8 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const axios = require('axios');
 const mongoose = require('mongoose');
+const mountVproxy = require('./vproxy-routes');
+mountVproxy(app, User);
 
 const app = express().use(bodyParser.json());
 
